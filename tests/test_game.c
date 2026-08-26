@@ -715,6 +715,61 @@ static void test_view_redaction(void) {
     CHECK(memcmp(v.discard_history, g->discard, g->discard_count) == 0);
 }
 
+// --- Pooling + server-side snapshot redaction --------------------------------
+static void test_init_and_redact(void) {
+    // game_init into caller storage is byte-identical to game_create (the v2
+    // daemon holds many games; the static instance is only for local play).
+    Rules r = test_rules(4, 31337);
+    Game pooled;
+    game_init(&pooled, &r);
+    Game* st = game_create(&r);
+    CHECK(memcmp(&pooled, st, GAME_SERIAL_SIZE) == 0);
+
+    Game* g = fresh(4, 31338);
+    int actor = g->turn;
+    int other = (actor + 1) % 4;
+
+    // Mid-round, stock-drawn card held: the holder sees it, nobody else does.
+    CHECK(game_apply(g, A(ACTION_DRAW_STOCK, 0)));
+    Game red;
+    game_redact_for(&red, g, actor);
+    CHECK(red.rng == 0 && red.rules.seed == 0);
+    CHECK(red.held_card == g->held_card);
+    CHECK(red.stock_count == g->stock_count);
+    for (int i = 0; i < red.stock_count; i++) CHECK(red.stock[i] == 0);
+    CHECK(memcmp(red.players[actor].rack.slots,
+                 g->players[actor].rack.slots, RACK_SLOTS) == 0);
+    for (int s = 0; s < RACK_SLOTS; s++) CHECK(red.players[other].rack.slots[s] == 0);
+    CHECK(red.anim.frames == 0 && red.anim.kind == ANIM_NONE);
+
+    game_redact_for(&red, g, other);
+    CHECK(red.held_card == 0);                       // hidden held card
+    CHECK(red.phase == PHASE_PLACE);                 // ...but its existence shows
+    for (int s = 0; s < RACK_SLOTS; s++) CHECK(red.players[actor].rack.slots[s] == 0);
+    CHECK(memcmp(red.players[other].rack.slots,
+                 g->players[other].rack.slots, RACK_SLOTS) == 0);
+
+    // A discard-drawn card was taken face up: public in every seat's snapshot.
+    CHECK(game_apply(g, A(ACTION_PLACE, 3)));
+    CHECK(game_apply(g, A(ACTION_DRAW_DISCARD, 0)));
+    game_redact_for(&red, g, (g->turn + 1) % 4);
+    CHECK(red.held_card == g->held_card);
+
+    // The discard pile and public per-seat facts survive redaction.
+    CHECK(red.discard_count == g->discard_count);
+    CHECK(memcmp(red.discard, g->discard, g->discard_count) == 0);
+    CHECK(memcmp(red.turns_taken, g->turns_taken, sizeof g->turns_taken) == 0);
+
+    // At the reveal every rack is public — that's the physical table rule.
+    g->phase = PHASE_ROUND_OVER;
+    game_redact_for(&red, g, other);
+    for (int i = 0; i < 4; i++) {
+        CHECK(memcmp(red.players[i].rack.slots,
+                     g->players[i].rack.slots, RACK_SLOTS) == 0);
+    }
+    CHECK(red.rng == 0 && red.rules.seed == 0);      // never, in any phase
+}
+
 // --- Fixed-timestep accumulator (tick.c) -------------------------------------
 static void test_sim_clock(void) {
     SimClock c = {0};
@@ -770,6 +825,7 @@ int main(void) {
     test_determinism();
     test_serialization();
     test_view_redaction();
+    test_init_and_redact();
     test_sim_clock();
     if (failures == 0) {
         printf("OK: all checks passed\n");

@@ -77,6 +77,18 @@ android-play` builds the Play `.aab`), `make ios` / `make ios-sim` (hand
 assembled `.ipa`, no Xcode project). CI builds all of these on every PR; see
 `.github/workflows/ci.yml` for the exact toolchain setup each platform needs.
 
+## Multiplayer server (v2, in progress)
+
+`make server` builds `orserverd`, the authoritative multiplayer daemon
+(Linux): rooms with join codes, a public quick-match queue with AI backfill,
+anonymous seat tokens with reconnect, turn clocks with AI takeover, and
+per-seat redacted state over WebSocket. Single-threaded with fixed pools —
+one tiny fly.io machine holds a thousand concurrent tables (`fly deploy`
+with the included `fly.toml` / `Dockerfile.server`). The desktop app has a
+**Play Online** menu (Quick Match, Create Table, Join by Code) that speaks to
+it; point it at a daemon with `OPENRACKEM_SERVER` / `OPENRACKEM_PORT`
+(default `127.0.0.1:8080`). See `docs/PLAN-MULTIPLAYER.md`.
+
 ## Architecture notes
 
 - `game.c` / `rules.c` / `ai.c` are pure logic: no rendering, no raylib, no

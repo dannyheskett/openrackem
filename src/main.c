@@ -16,11 +16,16 @@
 #include <emscripten/emscripten.h>
 #endif
 
+#include "netgame.h"
+
 typedef enum {
     STATE_MENU,
     STATE_OPTIONS,
     STATE_PLAYING,
     STATE_PAUSED,
+    STATE_ONLINE_MENU,  // choose quick / create / join (net builds only)
+    STATE_ONLINE_JOIN,  // entering a room code
+    STATE_ONLINE,       // connected: lobby, waiting, or a live online match
 } AppState;
 
 // Menu actions. The set of items shown depends on whether a game is in
@@ -28,15 +33,16 @@ typedef enum {
 typedef enum {
     ACT_RESUME,
     ACT_NEW,
+    ACT_ONLINE,
     ACT_OPTIONS,
     ACT_SOUND,
     ACT_RECORD,
     ACT_EXIT,
 } MenuAction;
 
-// Upper bound on labels[]/actions[]: one slot per MenuAction (6). Each action
+// Upper bound on labels[]/actions[]: one slot per MenuAction (7). Each action
 // appears at most once, so build_menu can never overflow.
-#define MAX_MENU_ITEMS 6
+#define MAX_MENU_ITEMS 7
 
 // The Options screen exposes exactly what the plan allows: players, difficulty,
 // bonus scoring, partners, target score. Everything else stays at the official
@@ -73,6 +79,7 @@ static int build_menu(bool resumable, const char* labels[], MenuAction actions[]
     int n = 0;
     if (resumable) { labels[n] = "Resume Game"; actions[n++] = ACT_RESUME; }
     labels[n] = "New Game"; actions[n++] = ACT_NEW;
+    if (net_available()) { labels[n] = "Play Online"; actions[n++] = ACT_ONLINE; }
     labels[n] = "Options";  actions[n++] = ACT_OPTIONS;
     labels[n] = sound_is_enabled() ? "Sound: On" : "Sound: Off"; actions[n++] = ACT_SOUND;
 #ifndef OR_TOUCH
@@ -204,14 +211,18 @@ typedef struct {
     bool quit;
     SimClock clock;    // fixed-timestep accumulator (only advanced while playing)
     double prev_time;  // GetTime() at the previous frame; 0 before the first frame
+    NetGame net;       // the online session (valid in STATE_ONLINE)
+    int online_sel;    // cursor on the online submenu
+    char join_code[8]; // code being entered on the Join screen
+    int code_cursor;   // active slot on the Join screen (0..5)
 } AppCtx;
 
-// Synthesize the human player's Action for this frame from keyboard and touch,
-// or ACTION_COUNT-equivalent "none". Returns true when an action was produced.
-static bool human_action(AppCtx* c, const Input* in, Action* out) {
-    Game* g = c->game;
-    if (g->rules.human_seat < 0) return false;                 // full-AI game
-    if ((int)g->turn != g->rules.human_seat) return false;     // not our turn
+// Synthesize the acting player's Action for this frame from keyboard and
+// touch, for the seat `seat` of game `g` with cursor state `ui`. Returns true
+// when an action was produced. Shared by offline play and the online client.
+static bool input_to_action(Game* g, int seat, TableUi* ui, const Input* in, Action* out) {
+    if (seat < 0) return false;                                // full-AI game
+    if ((int)g->turn != seat) return false;                    // not our turn
     if (g->phase != PHASE_DRAW && g->phase != PHASE_PLACE) return false;
 
     // Keyboard.
@@ -219,9 +230,9 @@ static bool human_action(AppCtx* c, const Input* in, Action* out) {
         if (in->draw_stock_pressed)   { *out = (Action){ACTION_DRAW_STOCK, 0};   return true; }
         if (in->draw_discard_pressed) { *out = (Action){ACTION_DRAW_DISCARD, 0}; return true; }
     } else {
-        if (in->cursor_up   && c->ui.cursor < RACK_SLOTS - 1) c->ui.cursor++;
-        if (in->cursor_down && c->ui.cursor > 0)              c->ui.cursor--;
-        if (in->confirm_pressed) { *out = (Action){ACTION_PLACE, (uint8_t)c->ui.cursor}; return true; }
+        if (in->cursor_up   && ui->cursor < RACK_SLOTS - 1) ui->cursor++;
+        if (in->cursor_down && ui->cursor > 0)              ui->cursor--;
+        if (in->confirm_pressed) { *out = (Action){ACTION_PLACE, (uint8_t)ui->cursor}; return true; }
         if (in->throw_pressed)   { *out = (Action){ACTION_DISCARD, 0}; return true; }
     }
 
@@ -233,7 +244,7 @@ static bool human_action(AppCtx* c, const Input* in, Action* out) {
             if (hit == HIT_DISCARD) { *out = (Action){ACTION_DRAW_DISCARD, 0}; return true; }
         } else {
             if (hit >= 0 && hit < RACK_SLOTS) {
-                c->ui.cursor = hit;
+                ui->cursor = hit;
                 *out = (Action){ACTION_PLACE, (uint8_t)hit};
                 return true;
             }
@@ -243,6 +254,114 @@ static bool human_action(AppCtx* c, const Input* in, Action* out) {
         }
     }
     return false;
+}
+
+// --- Online submenu + status --------------------------------------------------
+#define ONLINE_ITEMS 4
+enum { ONL_QUICK = 0, ONL_CREATE, ONL_JOIN, ONL_BACK };
+static const char* const ONLINE_LABELS[ONLINE_ITEMS] = {
+    "Quick Match", "Create Table", "Join by Code", "Back"
+};
+
+// The daemon address. Plain WebSocket, so this points at a local dev daemon or
+// a self-hosted plain-ws endpoint by default; override with the environment.
+// (A TLS client for the public fly.io wss endpoint is a follow-up.)
+static const char* server_host(void) {
+    const char* h = getenv("OPENRACKEM_SERVER");
+    return (h && h[0]) ? h : "127.0.0.1";
+}
+static int server_port(void) {
+    const char* p = getenv("OPENRACKEM_PORT");
+    int v = p ? atoi(p) : 0;
+    return v > 0 ? v : 8080;
+}
+
+// The room-code alphabet the daemon uses (no ambiguous 0/O/1/I), for the Join
+// slot picker.
+static const char CODE_ALPHABET[] = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+// Drive the online submenu one frame (plain navigation). Returns the chosen
+// item (ONL_*) on select, or -1.
+static int online_menu(AppCtx* c, const Input* in) {
+    if (in->escape_pressed) return ONL_BACK;
+    if (in->menu_up) {
+        c->online_sel = (c->online_sel + ONLINE_ITEMS - 1) % ONLINE_ITEMS;
+        sound_play(SFX_MENU_MOVE);
+    }
+    if (in->menu_down) {
+        c->online_sel = (c->online_sel + 1) % ONLINE_ITEMS;
+        sound_play(SFX_MENU_MOVE);
+    }
+    bool sel = in->select_pressed;
+    if (in->touch_tap) {
+        int hit = render_menu_hit_test((Vector2){in->tap_x, in->tap_y});
+        if (hit >= 0 && hit < ONLINE_ITEMS) { c->online_sel = hit; sel = true; }
+    }
+    return sel ? c->online_sel : -1;
+}
+
+// The Join-by-code entry screen: a 6-slot code picked from the daemon's
+// alphabet. Left/Right move the cursor, Up/Down cycle the letter, confirm
+// joins. Returns 1 to join, -1 to go back, 0 to stay.
+static int join_screen(AppCtx* c, const Input* in) {
+    if (in->escape_pressed) return -1;
+    if (c->join_code[0] == '\0') {
+        for (int i = 0; i < 6; i++) c->join_code[i] = 'A';
+        c->join_code[6] = '\0';
+    }
+    if (in->menu_left)  c->code_cursor = (c->code_cursor + 5) % 6;
+    if (in->menu_right) c->code_cursor = (c->code_cursor + 1) % 6;
+    if (in->menu_up || in->menu_down) {
+        const char* pos = strchr(CODE_ALPHABET, c->join_code[c->code_cursor]);
+        int idx = pos ? (int)(pos - CODE_ALPHABET) : 0;
+        int n = (int)(sizeof CODE_ALPHABET - 1);
+        idx = (idx + (in->menu_up ? 1 : n - 1)) % n;
+        c->join_code[c->code_cursor] = CODE_ALPHABET[idx];
+        sound_play(SFX_MENU_MOVE);
+    }
+    if (in->confirm_pressed) return 1;
+    return 0;
+}
+
+// Render the online submenu / status. `code_cursor` (0..5, -1 hidden) shows
+// which Join slot is active.
+static void render_online(const AppCtx* c) {
+    const NetGame* ng = &c->net;
+    if (c->state == STATE_ONLINE_MENU) {
+        render_menu("PLAY ONLINE", ONLINE_LABELS, ONLINE_ITEMS, c->online_sel, ONL_BACK);
+        return;
+    }
+    // STATE_ONLINE: playing, or a status card while connecting/waiting.
+    if (ng->state == NG_PLAYING && ng->have_game) {
+        render_frame(&ng->game, &c->ui);
+        return;
+    }
+    char l0[48] = "", l1[48] = "";
+    const char* title = "ONLINE";
+    switch (ng->state) {
+    case NG_CONNECTING: snprintf(l0, sizeof l0, "Connecting..."); break;
+    case NG_LOBBY:      snprintf(l0, sizeof l0, "Connected"); break;
+    case NG_QUEUED:
+        snprintf(l0, sizeof l0, "Finding a match...");
+        snprintf(l1, sizeof l1, "Queue position %d", ng->queue_pos);
+        break;
+    case NG_WAITING:
+        title = "WAITING FOR PLAYERS";
+        snprintf(l0, sizeof l0, "Room code: %s", ng->code);
+        snprintf(l1, sizeof l1, "%d / %d joined", ng->joined, ng->players);
+        break;
+    case NG_DISCONNECTED: snprintf(l0, sizeof l0, "Reconnecting..."); break;
+    case NG_ERROR:
+        title = "DISCONNECTED";
+        snprintf(l0, sizeof l0, "%s", ng->err[0] ? ng->err : "connection failed");
+        snprintf(l1, sizeof l1, "Press any key");
+        break;
+    default: break;
+    }
+    const char* lines[2]; int n = 0;
+    if (l0[0]) lines[n++] = l0;
+    if (l1[0]) lines[n++] = l1;
+    render_menu(title, lines, n, -1, -1);
 }
 
 // One iteration of the game loop. `arg` is an AppCtx* (void* to match the
@@ -303,6 +422,11 @@ static void frame_step(void* arg) {
                 c->ui = (TableUi){ .cursor = 0, .standings = false };
                 if (recorder_active()) { recorder_stop(); recorder_start(NULL); }
                 c->state = STATE_PLAYING;
+                sound_play(SFX_MENU_SELECT);
+                break;
+            case ACT_ONLINE:
+                c->state = STATE_ONLINE_MENU;
+                c->online_sel = 0;
                 sound_play(SFX_MENU_SELECT);
                 break;
             case ACT_OPTIONS:
@@ -434,7 +558,8 @@ static void frame_step(void* arg) {
             }
         } else {
             Action a;
-            if (!phase_flipped && human_action(c, &in, &a)) {
+            if (!phase_flipped &&
+                input_to_action(g, g->rules.human_seat, &c->ui, &in, &a)) {
                 unsigned before = g->events;
                 if (game_apply(g, a)) {
                     frame_events |= g->events & ~before;
@@ -462,6 +587,75 @@ static void frame_step(void* arg) {
             c->state = STATE_PLAYING;
         }
         break;
+
+    case STATE_ONLINE_MENU: {
+        // Choose how to get into a game. Quick Match needs no code; Create
+        // hands back a code to share; Join enters one with the slot cursor.
+        int oc = online_menu(c, &in);
+        if (oc == ONL_BACK) { c->state = STATE_MENU; c->selected = 0; break; }
+        if (oc == ONL_JOIN) {
+            c->state = STATE_ONLINE_JOIN;
+            c->code_cursor = 0;
+            sound_play(SFX_MENU_SELECT);
+        } else if (oc >= 0) {
+            NgJoin j = (oc == ONL_CREATE) ? NG_JOIN_CREATE : NG_JOIN_QUICK;
+            netgame_start(&c->net, server_host(), server_port(), j,
+                          NULL, current_options());
+            c->ui = (TableUi){ .cursor = 0, .standings = false };
+            c->state = STATE_ONLINE;
+            sound_play(SFX_MENU_SELECT);
+        }
+        break; // rendered via the dispatch below
+    }
+
+    case STATE_ONLINE_JOIN: {
+        int r = join_screen(c, &in);
+        if (r < 0) { c->state = STATE_ONLINE_MENU; break; }
+        if (r > 0) {
+            netgame_start(&c->net, server_host(), server_port(), NG_JOIN_CODE,
+                          c->join_code, current_options());
+            c->ui = (TableUi){ .cursor = 0, .standings = false };
+            c->state = STATE_ONLINE;
+            sound_play(SFX_MENU_SELECT);
+        }
+        break; // rendered via the dispatch below
+    }
+
+    case STATE_ONLINE: {
+        unsigned ev = netgame_update(&c->net);
+        NetGame* ng = &c->net;
+        if (in.escape_pressed) {
+            netgame_close(ng);
+            c->state = STATE_MENU;
+            c->selected = 0;
+            break;
+        }
+        if (ng->state == NG_PLAYING) {
+            play_event_sounds(&ng->game, ev);
+            if (ng->game.phase == PHASE_ROUND_OVER) {
+                // First confirm shows standings; the second sends `next`.
+                if (in.confirm_pressed || in.touch_tap) {
+                    if (!c->ui.standings) { c->ui.standings = true; sound_play(SFX_MENU_MOVE); }
+                    else { netgame_confirm(ng); c->ui.standings = false; }
+                }
+            } else if (ng->game.phase == PHASE_MATCH_OVER) {
+                if (in.confirm_pressed || in.touch_tap) {
+                    netgame_close(ng);
+                    c->state = STATE_MENU;
+                    c->selected = 0;
+                }
+            } else {
+                Action a;
+                if (input_to_action(&ng->game, ng->my_seat, &c->ui, &in, &a)) {
+                    netgame_action(ng, a);
+                }
+            }
+        } else if (ng->state == NG_ERROR) {
+            // Any key returns to the menu once the failure is shown.
+            if (in.any_pressed && !in.fullscreen_toggle) { c->state = STATE_MENU; c->selected = 0; }
+        }
+        break;
+    }
     }
 
     // Render for the state we ended the frame in. Every state must be handled
@@ -475,6 +669,19 @@ static void frame_step(void* arg) {
         render_menu("OPTIONS", opt_labels, opt_count, c->selected, OPT_BACK);
     } else if (c->state == STATE_PAUSED) {
         render_pause(c->game, &c->ui);
+    } else if (c->state == STATE_ONLINE_MENU || c->state == STATE_ONLINE) {
+        render_online(c);
+    } else if (c->state == STATE_ONLINE_JOIN) {
+        // Show the code with the active slot bracketed, e.g. "A B [C] D E F".
+        char shown[24] = {0};
+        int p = 0;
+        for (int i = 0; i < 6 && p < 20; i++) {
+            char ch = c->join_code[i] ? c->join_code[i] : 'A';
+            if (i == c->code_cursor) p += snprintf(shown + p, sizeof shown - p, "[%c]", ch);
+            else p += snprintf(shown + p, sizeof shown - p, " %c ", ch);
+        }
+        const char* lines[] = { shown, "Up/Down: letter   Left/Right: slot", "Enter: join" };
+        render_menu("JOIN BY CODE", lines, 3, -1, -1);
     } else {
         render_frame(c->game, &c->ui);
     }

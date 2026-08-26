@@ -250,7 +250,12 @@ static void advance_turn(Game* g) {
 // game yet" from a live game.
 Game* game_create(const Rules* rules) {
     static Game game;
-    Game* g = &game;
+    game_init(&game, rules);
+    return &game;
+}
+
+void game_init(Game* out, const Rules* rules) {
+    Game* g = out;
     memset(g, 0, sizeof *g);
 
     // Field-by-field, not struct assignment: assignment copies the caller's
@@ -280,11 +285,41 @@ Game* game_create(const Rules* rules) {
     // cutting low card); the deal rotates left each round.
     g->dealer = (uint8_t)rng_below(&g->rng, (uint32_t)g->rules.player_count);
     deal_round(g);
-    return g;
 }
 
 void game_destroy(Game* game) {
     (void)game; // static instance; nothing to free
+}
+
+void game_redact_for(Game* out, const Game* g, int seat) {
+    memcpy(out, g, sizeof *out);
+
+    // The RNG state and the seed each reconstruct every hidden card (the
+    // GameView seed-leak lesson): neither may reach a client in any form.
+    out->rng = 0;
+    out->rules.seed = 0;
+
+    // The face-down stock: the count is public, the order never is.
+    memset(out->stock, 0, sizeof out->stock);
+
+    // Other racks are hidden until they physically turn face up at the
+    // round-over reveal (and stay up through the match banner).
+    bool reveal = (g->phase == PHASE_ROUND_OVER || g->phase == PHASE_MATCH_OVER);
+    for (int i = 0; i < MAX_PLAYERS; i++) {
+        if (i != seat && !reveal) {
+            memset(out->players[i].rack.slots, 0, RACK_SLOTS);
+        }
+    }
+
+    // A stock-drawn card is private to its holder; a discard draw happened
+    // face up. Mirrors game_view_for: held_card 0 while phase == PHASE_PLACE
+    // means "a hidden card is held" (clients render a back).
+    if (g->held_card && !(seat == g->turn || g->held_from_discard)) {
+        out->held_card = 0;
+    }
+
+    // Presentation never crosses the wire.
+    memset(&out->anim, 0, sizeof out->anim);
 }
 
 bool game_is_over(const Game* g) {

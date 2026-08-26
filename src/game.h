@@ -121,6 +121,19 @@ typedef struct { uint8_t type; uint8_t slot; } Action;
 Game* game_create(const Rules* rules);
 void  game_destroy(Game* game);
 
+// Pool-friendly construction for the v2 server: identical to game_create but
+// into caller-owned storage, so a daemon can hold thousands of concurrent
+// games. game_create keeps its single static instance for the local game.
+void game_init(Game* out, const Rules* rules);
+
+// Per-seat snapshot redaction: everything `seat` may know, in Game shape, so
+// a remote client can hold and render it with the same code paths as a local
+// game. Hides the stock order, the RNG state and seed, other seats' racks
+// (public only during the round-over/match-over reveal), and a stock-drawn
+// held card that isn't the seat's own (held_card 0 + PHASE_PLACE = a hidden
+// card is held). Presentation state is zeroed.
+void game_redact_for(Game* out, const Game* g, int seat);
+
 bool game_action_legal(const Game* g, Action a);
 bool game_apply(Game* g, Action a);          // false = rejected, state untouched
 void game_update(Game* g);                   // one 60 Hz step: animation + AI pacing

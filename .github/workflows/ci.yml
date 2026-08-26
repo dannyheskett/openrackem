@@ -39,6 +39,10 @@ jobs:
         run: make test
       - name: Build dev + release
         run: make all release
+      - name: Build multiplayer daemon
+        run: make server
+      - name: Online end-to-end (daemon + two clients over loopback)
+        run: make net-e2e
 
   windows:
     runs-on: ubuntu-22.04
