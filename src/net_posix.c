@@ -187,7 +187,12 @@ static int decode_frame(uint8_t* buf, size_t len, int* op, uint8_t** pl, size_t*
 
 static void try_read(NetConn* c) {
     for (;;) {
-        if (c->in_len == NET_IN_CAP) { c->status = NET_ERROR; return; }
+        // Buffer full: stop reading and fall through to the decoder, which
+        // consumes the complete frames sitting in it and frees space for the
+        // next poll. Only a single frame larger than the buffer is fatal, and
+        // decode_frame reports that as a protocol error below — erroring here
+        // would instead drop a buffer full of perfectly valid frames.
+        if (c->in_len == NET_IN_CAP) break;
         ssize_t n = read(c->fd, c->in + c->in_len, NET_IN_CAP - c->in_len);
         if (n == 0) { c->status = NET_CLOSED; return; }
         if (n < 0) {
@@ -204,7 +209,12 @@ static void try_read(NetConn* c) {
         for (size_t i = 0; i + 3 < c->in_len; i++) {
             if (memcmp(c->in + i, "\r\n\r\n", 4) == 0) { end = c->in + i + 4; break; }
         }
-        if (!end) return;
+        if (!end) {
+            // A full buffer with no header terminator can't make progress —
+            // treat it as a bad handshake rather than stalling forever.
+            if (c->in_len == NET_IN_CAP) c->status = NET_ERROR;
+            return;
+        }
         if (c->in_len < 12 || memcmp(c->in, "HTTP/1.1 101", 12) != 0) {
             c->status = NET_ERROR;
             return;

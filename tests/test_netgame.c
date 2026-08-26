@@ -191,6 +191,31 @@ static void test_parse_rejects_junk(void) {
     CHECK(!netgame_parse_state(&ng, "{\"t\":\"state\",\"v\":2}", 18));
     CHECK(!netgame_parse_state(&ng, "{\"t\":\"state\",\"v\":1,\"players\":9,\"seat\":0}", 40));
     CHECK(!netgame_parse_state(&ng, "{\"t\":\"state\",\"v\":1,\"players\":4,\"seat\":9}", 40));
+    // Hostile seat indices must be rejected, not written into the game (a
+    // turn/dealer/winner past MAX_PLAYERS would be an OOB write in seat_name).
+    CHECK(!netgame_parse_state(&ng,
+        "{\"t\":\"state\",\"v\":1,\"players\":4,\"seat\":0,\"phase\":1,\"turn\":200}", 62));
+    CHECK(!netgame_parse_state(&ng,
+        "{\"t\":\"state\",\"v\":1,\"players\":4,\"seat\":0,\"phase\":1,\"turn\":0,\"dealer\":99}", 71));
+    CHECK(!netgame_parse_state(&ng,
+        "{\"t\":\"state\",\"v\":1,\"players\":4,\"seat\":0,\"phase\":3,\"turn\":0,\"winner\":200}", 72));
+    CHECK(!netgame_parse_state(&ng,
+        "{\"t\":\"state\",\"v\":1,\"players\":4,\"seat\":0,\"phase\":9,\"turn\":0}", 58));
+    // ...but NO_WINNER (255) for the winners is legal.
+    CHECK(netgame_parse_state(&ng,
+        "{\"t\":\"state\",\"v\":1,\"players\":4,\"seat\":0,\"phase\":1,\"turn\":0,\"winner\":255,"
+        "\"match_winner\":255}", 90));
+
+    // A reveal 'racks' with a short subarray must not leak stack: the missing
+    // slots read back as 0, not garbage.
+    memset(&ng, 0xAB, sizeof ng);   // poison, so any uncopied slot shows
+    const char* shortrack =
+        "{\"t\":\"state\",\"v\":1,\"players\":2,\"seat\":0,\"phase\":3,\"turn\":0,"
+        "\"racks\":[[5,6,7],[1,2,3,4,5,6,7,8,9,10]]}";
+    CHECK(netgame_parse_state(&ng, shortrack, strlen(shortrack)));
+    CHECK(ng.game.players[0].rack.slots[0] == 5);
+    for (int i = 3; i < RACK_SLOTS; i++) CHECK(ng.game.players[0].rack.slots[i] == 0);
+
     // Deterministic garbage never crashes the parser.
     uint32_t lcg = 999;
     char b[128];

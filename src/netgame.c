@@ -90,19 +90,35 @@ bool netgame_parse_state(NetGame* ng, const char* json, size_t len) {
     g->rules.bonus_scoring = js_int(json, "bonus", 0) != 0;
     g->rules.partners = js_int(json, "partners", 0) != 0;
     g->phase = (uint8_t)js_int(json, "phase", PHASE_DRAW);
-    g->turn = (uint8_t)js_int(json, "turn", 0);
-    g->dealer = (uint8_t)js_int(json, "dealer", 0);
+    if (g->phase > PHASE_MATCH_OVER) return false;
+
+    // Seat indices from an untrusted server MUST be range-checked before the
+    // renderers use them: seat_name() indexes a static buf[MAX_PLAYERS][8], so
+    // a hostile turn/dealer/winner of e.g. 200 would be an out-of-bounds write.
+    // turn/dealer must be a real seat; the winners may also be NO_WINNER.
+    long turn = js_int(json, "turn", 0);
+    long dealer = js_int(json, "dealer", 0);
+    long winner = js_int(json, "winner", NO_WINNER);
+    long mwin = js_int(json, "match_winner", NO_WINNER);
+    if (turn < 0 || turn >= players) return false;
+    if (dealer < 0 || dealer >= players) return false;
+    if (winner != NO_WINNER && (winner < 0 || winner >= players)) return false;
+    if (mwin != NO_WINNER && (mwin < 0 || mwin >= players)) return false;
+    g->turn = (uint8_t)turn;
+    g->dealer = (uint8_t)dealer;
+    g->round_winner = (uint8_t)winner;
+    g->match_winner = (uint8_t)mwin;
+
     g->round_no = (uint8_t)js_int(json, "round", 1);
     g->stock_count = (uint8_t)js_int(json, "stock", 0);
     g->held_card = (uint8_t)js_int(json, "held", 0);
     g->held_from_discard = js_int(json, "hfd", 0) != 0;
-    g->round_winner = (uint8_t)js_int(json, "winner", NO_WINNER);
-    g->match_winner = (uint8_t)js_int(json, "match_winner", NO_WINNER);
     g->recycles = (uint8_t)js_int(json, "recycles", 0);
     g->events = (unsigned)js_int(json, "events", 0);
 
     int discard[MAX_CARDS];
     int dn = js_array(json, "discard", discard, MAX_CARDS);
+    if (dn > MAX_CARDS) dn = MAX_CARDS;
     g->discard_count = (uint8_t)dn;
     for (int i = 0; i < dn; i++) g->discard[i] = (uint8_t)discard[i];
 
@@ -123,9 +139,11 @@ bool netgame_parse_state(NetGame* ng, const char* json, size_t len) {
                 while (*rp == ' ' || *rp == ',') rp++;
                 if (*rp != '[') break;
                 int one[RACK_SLOTS];
-                js_array_at(rp, one, RACK_SLOTS);
+                int on = js_array_at(rp, one, RACK_SLOTS);
+                // Only copy the slots actually present; a short subarray from a
+                // buggy/hostile server otherwise leaks uninitialized stack.
                 for (int i = 0; i < RACK_SLOTS; i++) {
-                    g->players[p].rack.slots[i] = (uint8_t)one[i];
+                    g->players[p].rack.slots[i] = (i < on) ? (uint8_t)one[i] : 0;
                 }
                 // Skip to the end of this subarray.
                 int depth = 0;

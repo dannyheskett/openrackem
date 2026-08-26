@@ -67,6 +67,10 @@ void draw_mini_rack(int x, int y, int cw, int ch, const Rack* rack, bool face_up
 
 const char* seat_name(const Game* g, int seat) {
     static char buf[MAX_PLAYERS][8];
+    // Defensive clamp: buf is indexed by seat, so an out-of-range value (from
+    // a corrupt state) must never write past it. The online client already
+    // rejects such states, but this is the last line before the memory write.
+    if (seat < 0 || seat >= MAX_PLAYERS) return "?";
     if (seat == g->rules.human_seat) return "YOU";
     // Number the CPUs 1..k in seat order, skipping the human seat.
     int n = 0;
