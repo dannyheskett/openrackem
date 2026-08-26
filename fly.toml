@@ -6,9 +6,16 @@
 #
 # Game state lives in ONE machine's memory (fixed pools: 1024 rooms, 2048
 # connections, a few tens of MB total), so this app must never scale out and
-# never auto-stop: a second machine would split the room table, and a stop
-# would end every live game. A deploy replaces the machine and does end live
-# tables — ship server updates in quiet hours; clients just start new games.
+# never auto-stop: a second machine would split the room table (create-on-A
+# can't be joined-on-B; the quick queue would fragment), and a stop would end
+# every live game. A deploy replaces the machine and does end live tables —
+# ship server updates in quiet hours; clients just start new games.
+#
+# DEPLOY WITH:  fly deploy --ha=false
+# Plain `fly deploy` provisions a SECOND machine for zero-downtime HA, which
+# breaks the single-machine invariant above. --ha=false keeps it at one; if a
+# second ever appears, `fly scale count 1`. min_machines_running=1 +
+# auto_stop=off below keep that one always live.
 app = "openrackem-server"
 primary_region = "ewr"
 
