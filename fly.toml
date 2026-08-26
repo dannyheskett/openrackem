@@ -1,0 +1,33 @@
+# openrackem multiplayer daemon — a dedicated fly.io app, deployed with
+# `fly deploy` from the repo root (the game's store builds are unrelated).
+#
+# TLS terminates at Fly's edge proxy; the daemon speaks plain WebSocket on the
+# internal port and trusts the Fly-Client-IP header for rate limiting.
+#
+# Game state lives in ONE machine's memory (fixed pools: 1024 rooms, 2048
+# connections, a few tens of MB total), so this app must never scale out and
+# never auto-stop: a second machine would split the room table, and a stop
+# would end every live game. A deploy replaces the machine and does end live
+# tables — ship server updates in quiet hours; clients just start new games.
+app = "openrackem-server"
+primary_region = "ewr"
+
+[build]
+  dockerfile = "Dockerfile.server"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "3s"
+    method = "GET"
+    path = "/status"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

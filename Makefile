@@ -517,14 +517,16 @@ dist-ios: $(IOS_IPA)
 #                test can supply a scripted touch/clock surface. The recognizer
 #                is the same C every touch platform compiles.
 # ---------------------------------------------------------------------------
-TEST_BIN       := build/test_game
-TEST_AI_BIN    := build/test_ai
-TEST_INPUT_BIN := build/test_input
+TEST_BIN        := build/test_game
+TEST_AI_BIN     := build/test_ai
+TEST_INPUT_BIN  := build/test_input
+TEST_SERVER_BIN := build/test_server
 
-test: $(TEST_BIN) $(TEST_AI_BIN) $(TEST_INPUT_BIN)
+test: $(TEST_BIN) $(TEST_AI_BIN) $(TEST_INPUT_BIN) $(TEST_SERVER_BIN)
 	./$(TEST_BIN)
 	./$(TEST_AI_BIN)
 	./$(TEST_INPUT_BIN)
+	./$(TEST_SERVER_BIN)
 
 $(TEST_BIN): tests/test_game.c $(wildcard src/*.c src/*.h) | $(OBJ_DIR)
 	gcc $(CFLAGS_COMMON) -O0 -g tests/test_game.c -o $(TEST_BIN)
@@ -534,6 +536,11 @@ $(TEST_AI_BIN): tests/test_ai.c $(wildcard src/*.c src/*.h) | $(OBJ_DIR)
 
 $(TEST_INPUT_BIN): tests/test_input.c $(wildcard src/*.c src/*.h) | $(OBJ_DIR)
 	gcc $(CFLAGS_COMMON) -O0 -g -DPLATFORM_IOS tests/test_input.c -o $(TEST_INPUT_BIN)
+
+# test_server — the daemon core (rooms, tokens, timers, matchmaking, redacted
+# broadcast) plus the ws/wire codecs, driven socket-free with injected time.
+$(TEST_SERVER_BIN): tests/test_server.c $(wildcard src/*.c src/*.h src-server/*.c src-server/*.h) | $(OBJ_DIR)
+	gcc $(CFLAGS_COMMON) -Isrc-server -O0 -g tests/test_server.c -o $(TEST_SERVER_BIN)
 
 # AI difficulty benchmark (not part of `test`): thousands of seeded tier-vs-tier
 # matches with a win-rate report, for measuring evaluator tuning changes.
@@ -558,6 +565,27 @@ shots: $(SHOTS_BIN)
 $(SHOTS_BIN): tests/vis_shots.c $(wildcard src/*.c src/*.h) | $(OBJ_DIR)
 	gcc $(CFLAGS_COMMON) -O2 -DPLATFORM_WEB -I$(RAYLIB)/include \
 	    tests/vis_shots.c $(SHOTS_SRC) -o $(SHOTS_BIN) $(LDFLAGS)
+
+# ---------------------------------------------------------------------------
+# Multiplayer daemon (Linux only: epoll). Links the engine unchanged — no
+# raylib, no allocation after startup, fixed pools sized for a fly.io
+# shared-cpu-1x machine (see fly.toml + Dockerfile.server; deploy with
+# `fly deploy`). SERVER_CFLAGS lets the Docker build add -static.
+# ---------------------------------------------------------------------------
+SERVER_SRC := src-server/orserverd.c src-server/server_core.c \
+              src-server/ws.c src-server/wire.c \
+              src/rules.c src/game.c src/ai.c
+SERVER_BIN := build/orserverd
+SERVER_CFLAGS ?=
+
+server: $(SERVER_BIN)
+
+$(SERVER_BIN): $(SERVER_SRC) $(wildcard src/*.h src-server/*.h) | $(OBJ_DIR)
+	gcc -std=c99 -Wall -Wextra -O2 -Isrc -Isrc-server $(SERVER_CFLAGS) \
+	    $(SERVER_SRC) -o $@
+
+server-run: $(SERVER_BIN)
+	./$(SERVER_BIN)
 
 # ---------------------------------------------------------------------------
 # Distribution archives. Each dist-<platform> stages the platform binary plus
@@ -622,6 +650,6 @@ clean:
 # Pull in auto-generated header dependencies (ignored if not yet present).
 -include $(OBJ:.o=.d) $(REL_OBJ:.o=.d) $(WIN64_OBJ:.o=.d) $(WIN32_OBJ:.o=.d) $(MAC_OBJ:.o=.d)
 
-.PHONY: all run release run-release windows mac web web-serve test ai-bench shots clean \
+.PHONY: all run release run-release windows mac web web-serve test ai-bench shots server server-run clean \
         android android-play ios ios-sim \
         dist dist-linux dist-windows dist-mac dist-web dist-android dist-android-play dist-ios

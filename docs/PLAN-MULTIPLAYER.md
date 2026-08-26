@@ -10,9 +10,9 @@ iOS), cross-playing. Two ways in:
 - **Quick match:** a public queue that seats 2–4 strangers, backfilling empty
   seats with AI after a short wait so a game always starts.
 
-Decisions taken (2026-08-26): authoritative **C daemon on a small VPS**,
-**anonymous per-match session tokens** (no accounts), public matchmaking
-included. No chat and no user-entered names anywhere — seats get generated
+Decisions taken (2026-08-26): authoritative **C daemon on fly.io** (a
+dedicated app on one tiny always-on machine — see `fly.toml`), **anonymous
+per-match session tokens** (no accounts), public matchmaking included. No chat and no user-entered names anywhere — seats get generated
 table handles — so the public mode carries **zero moderation surface**. AI
 takeover covers leavers and disconnects, so no penalty system exists either.
 
@@ -48,23 +48,26 @@ single-threaded C daemon owns every `Game`; clients hold only what their seat
 may see.
 
 ```
- native app ──┐                       ┌────────────────────────────┐
- web (WASM) ──┼── WSS ── caddy ── WS ─┤ orserverd (C, one thread)  │
- native app ──┘      (TLS terminator) │  rooms[] { Game, seats[4] }│
-                                      │  queue, timers, audit log  │
-                                      └────────────────────────────┘
+ native app ──┐                          ┌────────────────────────────┐
+ web (WASM) ──┼── WSS ── fly edge ── WS ──┤ orserverd (C, one thread)  │
+ native app ──┘      (TLS terminates      │  rooms[] { Game, seats[4] }│
+                      at Fly's proxy)     │  queue, timers, audit log  │
+                                          └────────────────────────────┘
 ```
 
 - **Transport: WebSocket everywhere.** It is the only option for the WASM
   build, and native speaks it too, so web/native cross-play is free. TLS is
-  terminated by caddy (or nginx) in front; the daemon serves plain WS on
-  localhost and stays crypto-free.
+  terminated at Fly's edge proxy; the daemon serves plain WS on the internal
+  port and stays crypto-free.
 - **Wire format: versioned JSON.** At card-game rates (a few messages per
   second per table, tops) readability beats bytes. Every message carries
   `v`; the server rejects mismatched clients with an upgrade notice.
-- **The daemon** is `src-server/orserverd.c` + the v1 engine objects. Event
-  loop from libwebsockets (or mongoose); no threads, no allocation per
-  message. A fixed pool (`MAX_ROOMS`, e.g. 4096) bounds everything.
+- **The daemon** is `src-server/` + the v1 engine objects: an epoll loop
+  and a from-scratch RFC 6455 subset (`ws.c` — the repo vendors nothing), a
+  strict flat-JSON codec (`wire.c`), and the socket-free, time-injected pool
+  core (`server_core.c`) that tests/test_server.c drives directly. No
+  threads, no allocation after startup; fixed pools (1024 rooms, 2048
+  connections, ~40 MB total) bound everything.
 
 ## 4. Protocol
 
@@ -117,7 +120,8 @@ animation.
   legible, and not at all at all-AI tables.
 - **Audit log:** per match, `(timestamp, seed, Rules, action list, seats)` —
   a few hundred bytes. Kept N days for abuse/bug investigation, then deleted.
-  This is the only thing the server ever writes to disk.
+  Written to stdout — on fly.io that is the log stream, and its retention
+  window is the expiry.
 - **Rate limits:** per-IP caps on `create`/`quick` (rooms are the only
   resource an attacker can burn); per-connection message cap; oversized or
   malformed frames close the socket.
@@ -158,8 +162,10 @@ phase, plus the seed/rng zeroing pinned. Nothing else in the engine changes.
 
 ## 8. Operations and privacy
 
-- One static `orserverd` binary + caddy on a small VPS; systemd unit;
-  `/status` (rooms live, queue depth, uptime) for monitoring.
+- One static `orserverd` binary (`make server`) in a FROM-scratch image
+  (`Dockerfile.server`), deployed with `fly deploy` on a shared-cpu-1x /
+  256 MB machine pinned to exactly one instance (`fly.toml` explains why);
+  `/status` (rooms live, queue depth, uptime) doubles as the health check.
 - No accounts, no names, no persistent identity. Tokens die with the match;
   audit logs expire. **The store listings change**: "never touches the
   network" and the Play data-safety answers must be rewritten when
@@ -186,6 +192,9 @@ phase, plus the seed/rng zeroing pinned. Nothing else in the engine changes.
 
 ## 10. Milestones
 
+Status 2026-08-26: **N0 and N1 are implemented and tested** (`make server`,
+`make test`, `Dockerfile.server`, `fly.toml`); N2 (the client) is next.
+
 - **N0 — Protocol on loopback.** `game_init` + `game_redact_for` + tests;
   protocol spec frozen; headless daemon core with the loopback harness in CI.
   No UI, no sockets to the world.
@@ -200,8 +209,11 @@ phase, plus the seed/rng zeroing pinned. Nothing else in the engine changes.
 
 ## 11. Risks
 
-- **TLS in C** — avoided entirely by the caddy front; the daemon never sees
-  a certificate.
+- **TLS in C** — avoided entirely by Fly's edge; the daemon never sees a
+  certificate.
+- **Deploys end live tables** — state is in one machine's memory by design;
+  ship server updates in quiet hours and bump the protocol version when the
+  wire format changes.
 - **Queue liquidity** — AI backfill makes an empty queue invisible; the
   15/30 s rule guarantees a game.
 - **Round-over consensus** — "all humans confirm or timer lapses" needs care
