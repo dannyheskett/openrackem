@@ -535,6 +535,16 @@ $(TEST_AI_BIN): tests/test_ai.c $(wildcard src/*.c src/*.h) | $(OBJ_DIR)
 $(TEST_INPUT_BIN): tests/test_input.c $(wildcard src/*.c src/*.h) | $(OBJ_DIR)
 	gcc $(CFLAGS_COMMON) -O0 -g -DPLATFORM_IOS tests/test_input.c -o $(TEST_INPUT_BIN)
 
+# AI difficulty benchmark (not part of `test`): thousands of seeded tier-vs-tier
+# matches with a win-rate report, for measuring evaluator tuning changes.
+AI_BENCH_BIN := build/ai_bench
+
+ai-bench: $(AI_BENCH_BIN)
+	./$(AI_BENCH_BIN)
+
+$(AI_BENCH_BIN): tests/ai_bench.c $(wildcard src/*.c src/*.h) | $(OBJ_DIR)
+	gcc $(CFLAGS_COMMON) -O2 tests/ai_bench.c -o $(AI_BENCH_BIN)
+
 # ---------------------------------------------------------------------------
 # Distribution archives. Each dist-<platform> stages the platform binary plus
 # README.md + LICENSE + NOTICE and packages it under dist/. Driven by the
@@ -598,6 +608,6 @@ clean:
 # Pull in auto-generated header dependencies (ignored if not yet present).
 -include $(OBJ:.o=.d) $(REL_OBJ:.o=.d) $(WIN64_OBJ:.o=.d) $(WIN32_OBJ:.o=.d) $(MAC_OBJ:.o=.d)
 
-.PHONY: all run release run-release windows mac web web-serve test clean \
+.PHONY: all run release run-release windows mac web web-serve test ai-bench clean \
         android android-play ios ios-sim \
         dist dist-linux dist-windows dist-mac dist-web dist-android dist-android-play dist-ios
