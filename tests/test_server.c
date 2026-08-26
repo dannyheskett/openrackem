@@ -219,7 +219,7 @@ static void test_wire_codec(void) {
     uint32_t lcg = 77;
     char buf[128];
     for (int iter = 0; iter < 5000; iter++) {
-        int len = (int)(lcg = lcg * 1664525u + 1013904223u) % 100;
+        lcg = lcg * 1664525u + 1013904223u; int len = (int)(lcg % 100u);
         for (int i = 0; i < len; i++) {
             lcg = lcg * 1664525u + 1013904223u;
             buf[i] = (char)(lcg >> 24);
@@ -462,9 +462,10 @@ static void test_quick_match(void) {
 static void test_abuse(void) {
     fresh_server();
 
-    // Message flood: the rate bucket kicks the connection.
+    // Message flood: the rate bucket kicks the connection once the burst is
+    // spent (all at one instant, so no refill intervenes).
     connect_hello(0, "1.1.1.1");
-    for (int i = 0; i < 40 && !was_kicked(0); i++) say(0, "{\"t\":\"ping\"}");
+    for (int i = 0; i < RATE_BURST + 10 && !was_kicked(0); i++) say(0, "{\"t\":\"ping\"}");
     CHECK(was_kicked(0));
     srv_client_gone(S, 0, NOW);
 
@@ -498,7 +499,7 @@ static void test_abuse(void) {
         int id = iter % 32;
         if (!S->clients[id].used) connect_hello(id, "7.7.7.7");
         char buf[100];
-        int len = (int)(lcg = lcg * 1664525u + 1013904223u) % 96;
+        lcg = lcg * 1664525u + 1013904223u; int len = (int)(lcg % 96u);
         for (int i = 0; i < len; i++) {
             lcg = lcg * 1664525u + 1013904223u;
             buf[i] = (char)(lcg >> 16);

@@ -7,8 +7,15 @@
 
 // --- Tunables that are not pacing -------------------------------------------
 #define STRIKES_TO_AI    3      // consecutive turn timeouts before AI takeover
-#define RATE_BURST       20     // per-connection message budget...
-#define RATE_REFILL_MS   100    // ...refilling 1 per this many ms (~10 msg/s)
+// Per-connection message budget. Sized well above legitimate play — two
+// humans trading turns as fast as they physically can peaks near 40 msg/s
+// each (measured), and a normal game with server-paced AI opponents is a few
+// msg/s — while still tripping a real flood (hundreds/sec of garbage or
+// reconnect spam) within the burst, in under a second. The turn/phase gate
+// already makes out-of-turn actions cheap no-ops, so this only has to stop
+// connection-level abuse, not gameplay pace.
+#define RATE_BURST       100    // per-connection message budget...
+#define RATE_REFILL_MS   10     // ...refilling 1 per this many ms (~100 msg/s)
 #define IPCAP_WINDOW_MS  600000 // per-IP room-create/queue budget window...
 #define IPCAP_MAX        30     // ...and how many starts it allows
 #define ALOG_CAP         2048   // audit action log per room (then truncated)
