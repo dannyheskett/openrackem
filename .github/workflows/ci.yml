@@ -73,9 +73,7 @@ jobs:
       - name: Build raylib (universal arm64 + x86_64)
         run: ./scripts/build_raylib_mac.sh
       - name: Build universal binary
-        # Point pkg-config at brew's OpenSSL so the online client links wss://
-        # (absent, the Makefile falls back to a plain-ws-only client).
-        run: PKG_CONFIG_PATH="$(brew --prefix openssl@3)/lib/pkgconfig" make mac
+        run: make mac
 
   web:
     runs-on: ubuntu-22.04

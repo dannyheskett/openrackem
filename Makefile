@@ -25,10 +25,12 @@ SRC := src/main.c src/rules.c src/game.c src/ai.c src/tick.c src/input.c \
 CFLAGS_COMMON := -std=c99 -Wall -Wextra -I$(MINIH264_INC) -I$(MINIMP4_INC) -Isrc
 
 # TLS for the native online client's wss:// support (net_posix.c). Detected via
-# pkg-config so the desktop builds link the system OpenSSL, exactly as they link
-# raylib / X11 / GL. Absent -> OR_TLS undefined and the client is plain-ws only
-# (the Windows/mingw path, which never compiles net_posix.c anyway). On macOS
-# CI, point PKG_CONFIG_PATH at brew's openssl@3 so this resolves.
+# pkg-config so the Linux build links the system OpenSSL, exactly as it links
+# raylib / X11 / GL. Absent -> OR_TLS undefined and the client is plain-ws only.
+# Applied to the Linux target only: Windows (mingw, no OpenSSL) and the macOS
+# universal build (homebrew OpenSSL is arm64-only, unlinkable for x86_64) stay
+# plain-ws until a platform-native TLS backend (SChannel / Secure Transport)
+# lands; they reach the public wss server via a local tunnel meanwhile.
 ifeq ($(shell pkg-config --exists openssl 2>/dev/null && echo yes),yes)
 TLS_CFLAGS := -DOR_TLS $(shell pkg-config --cflags openssl)
 TLS_LIBS   := $(shell pkg-config --libs openssl)
@@ -118,14 +120,19 @@ $(OUT_WIN32): $(WIN32_OBJ)
 # macOS build (universal arm64 + x86_64). CI-only: needs a macOS runner with an
 # Xcode toolchain. raylib links several system frameworks for windowing, input,
 # and OpenGL.
+#
+# No OR_TLS here: homebrew's OpenSSL ships a single-arch (arm64) dylib, which a
+# universal binary can't link for the x86_64 slice. The online client is
+# plain-ws on macOS until a Secure Transport / Network.framework backend lands
+# (same follow-up as Windows/SChannel); macOS reaches the public wss server via
+# a local tunnel meanwhile. Linux gets wss directly (system OpenSSL is fat).
 # ---------------------------------------------------------------------------
 RAYLIB_MAC  := third_party/raylib-install-mac
 MAC_CC      := clang
 MAC_ARCHES  := -arch arm64 -arch x86_64
-MAC_CFLAGS  := $(CFLAGS_COMMON) -O2 $(MAC_ARCHES) $(TLS_CFLAGS) -I$(RAYLIB_MAC)/include
+MAC_CFLAGS  := $(CFLAGS_COMMON) -O2 $(MAC_ARCHES) -I$(RAYLIB_MAC)/include
 MAC_LDFLAGS := $(MAC_ARCHES) -L$(RAYLIB_MAC)/lib -lraylib -lpthread \
-               -framework Cocoa -framework IOKit -framework CoreVideo -framework OpenGL \
-               $(TLS_LIBS)
+               -framework Cocoa -framework IOKit -framework CoreVideo -framework OpenGL
 
 MAC_OBJ_DIR := build/obj-mac
 MAC_OBJ := $(SRC:src/%.c=$(MAC_OBJ_DIR)/%.o)
