@@ -224,11 +224,15 @@ static void end_round(Game* g, int winner) {
 }
 
 // A completed turn: count it, pass to the left, and pace the next AI. The turn
-// cap is the wedge-proof backstop documented at the top of the file.
+// cap is the wedge-proof backstop documented at the top of the file — and it
+// is deliberately NOT gated on stalemate_cutoff: with the cutoff off, two
+// deterministic AIs trading an unshuffled pile provably cycle forever (the
+// whole state repeats exactly), and an infinite round is worse than a
+// slightly-unofficial one. At 200 turns per seat no real round is affected.
 static void advance_turn(Game* g) {
     int seat = g->turn;
     if (g->turns_taken[seat] < 255) g->turns_taken[seat]++;
-    if (g->rules.stalemate_cutoff && g->turns_taken[seat] >= TURN_CAP) {
+    if (g->turns_taken[seat] >= TURN_CAP) {
         end_round(g, NO_WINNER);
         return;
     }

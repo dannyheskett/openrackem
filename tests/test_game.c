@@ -579,6 +579,19 @@ static void test_match(void) {
     CHECK(game_apply(g, A(ACTION_DISCARD, 0)));
     CHECK(g->phase == PHASE_ROUND_OVER);
     CHECK(g->round_winner == NO_WINNER);
+
+    // The cap holds even with the stalemate cutoff off: deterministic AIs
+    // trading an unshuffled pile can provably cycle forever, and disabling
+    // the official-rules cutoff must not also disable the wedge guard.
+    Rules cr = test_rules(2, 39);
+    cr.stalemate_cutoff = false;
+    g = game_create(&cr);
+    skip_deal(g);
+    g->turns_taken[g->turn] = TURN_CAP - 1;
+    CHECK(game_apply(g, A(ACTION_DRAW_STOCK, 0)));
+    CHECK(game_apply(g, A(ACTION_DISCARD, 0)));
+    CHECK(g->phase == PHASE_ROUND_OVER);
+    CHECK(g->round_winner == NO_WINNER);
 }
 
 // --- Determinism -------------------------------------------------------------

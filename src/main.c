@@ -392,6 +392,7 @@ static void frame_step(void* arg) {
         // game_update clears the event flags each step, so OR them into
         // frame_events to keep every sound when a frame runs more than one step.
         unsigned frame_events = 0;
+        uint8_t phase_before = g->phase;
         int steps = sim_clock_advance(&c->clock, dt);
 #ifdef OR_SIMSTATS
         simstats_count(now, steps);
@@ -400,11 +401,18 @@ static void frame_step(void* arg) {
             game_update(g);
             frame_events |= g->events;
         }
+        // The input above was released against the screen that existed BEFORE
+        // these steps ran. If the phase changed during them (an AI went out,
+        // the deal finished), that press must not act on a screen the player
+        // has never seen: a tap-spam during "CPU THINKING" would skip the
+        // round reveal, and a tap on the still-face-down discard outline could
+        // commit a blind forced draw the instant the deal completes.
+        bool phase_flipped = (g->phase != phase_before);
 
         // Round-over flow: first confirm shows the standings page, the second
         // starts the next round (or reveals the match result).
         if (g->phase == PHASE_ROUND_OVER) {
-            if (in.confirm_pressed || in.touch_tap) {
+            if (!phase_flipped && (in.confirm_pressed || in.touch_tap)) {
                 if (!c->ui.standings) {
                     c->ui.standings = true;
                     sound_play(SFX_MENU_MOVE);
@@ -416,7 +424,7 @@ static void frame_step(void* arg) {
                 }
             }
         } else if (g->phase == PHASE_MATCH_OVER) {
-            if (in.confirm_pressed || in.touch_tap) {
+            if (!phase_flipped && (in.confirm_pressed || in.touch_tap)) {
 #ifdef OR_AUTOPLAY
                 c->game = new_game(-1);
 #else
@@ -426,7 +434,7 @@ static void frame_step(void* arg) {
             }
         } else {
             Action a;
-            if (human_action(c, &in, &a)) {
+            if (!phase_flipped && human_action(c, &in, &a)) {
                 unsigned before = g->events;
                 if (game_apply(g, a)) {
                     frame_events |= g->events & ~before;
