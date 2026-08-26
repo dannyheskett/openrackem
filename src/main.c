@@ -263,17 +263,29 @@ static const char* const ONLINE_LABELS[ONLINE_ITEMS] = {
     "Quick Match", "Create Table", "Join by Code", "Back"
 };
 
-// The daemon address. Plain WebSocket, so this points at a local dev daemon or
-// a self-hosted plain-ws endpoint by default; override with the environment.
-// (A TLS client for the public fly.io wss endpoint is a follow-up.)
+// The daemon address. Defaults to the public deployment over wss:// so "Play
+// Online" works out of the box; override with the environment to reach a local
+// or self-hosted daemon (e.g. OPENRACKEM_SERVER=127.0.0.1 OPENRACKEM_PORT=8080,
+// which auto-selects plain ws:// on a non-443 port; force with OPENRACKEM_TLS).
+#define DEFAULT_SERVER "openrackem-server.fly.dev"
+#define DEFAULT_PORT   443
+
 static const char* server_host(void) {
     const char* h = getenv("OPENRACKEM_SERVER");
-    return (h && h[0]) ? h : "127.0.0.1";
+    return (h && h[0]) ? h : DEFAULT_SERVER;
 }
 static int server_port(void) {
     const char* p = getenv("OPENRACKEM_PORT");
     int v = p ? atoi(p) : 0;
-    return v > 0 ? v : 8080;
+    return v > 0 ? v : DEFAULT_PORT;
+}
+// TLS on by default for the public endpoint; off for a plain local daemon.
+// OPENRACKEM_TLS=1/0 forces it; otherwise it follows the port (443 = wss).
+static bool server_tls(void) {
+    const char* t = getenv("OPENRACKEM_TLS");
+    if (t && (t[0] == '1' || t[0] == 'y' || t[0] == 'Y')) return true;
+    if (t && (t[0] == '0' || t[0] == 'n' || t[0] == 'N')) return false;
+    return server_port() == 443;
 }
 
 // The room-code alphabet the daemon uses (no ambiguous 0/O/1/I), for the Join
@@ -599,7 +611,7 @@ static void frame_step(void* arg) {
             sound_play(SFX_MENU_SELECT);
         } else if (oc >= 0) {
             NgJoin j = (oc == ONL_CREATE) ? NG_JOIN_CREATE : NG_JOIN_QUICK;
-            netgame_start(&c->net, server_host(), server_port(), j,
+            netgame_start(&c->net, server_host(), server_port(), server_tls(), j,
                           NULL, current_options());
             c->ui = (TableUi){ .cursor = 0, .standings = false };
             c->state = STATE_ONLINE;
@@ -612,8 +624,8 @@ static void frame_step(void* arg) {
         int r = join_screen(c, &in);
         if (r < 0) { c->state = STATE_ONLINE_MENU; break; }
         if (r > 0) {
-            netgame_start(&c->net, server_host(), server_port(), NG_JOIN_CODE,
-                          c->join_code, current_options());
+            netgame_start(&c->net, server_host(), server_port(), server_tls(),
+                          NG_JOIN_CODE, c->join_code, current_options());
             c->ui = (TableUi){ .cursor = 0, .standings = false };
             c->state = STATE_ONLINE;
             sound_play(SFX_MENU_SELECT);

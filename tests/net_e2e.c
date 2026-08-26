@@ -62,14 +62,14 @@ int main(void) {
     Rules r = rules_default();
     r.player_count = 2;
     r.target_score = 50;    // shortest match: one player going out decides it
-    netgame_start(&a, "127.0.0.1", port, NG_JOIN_CREATE, NULL, &r);
+    netgame_start(&a, "127.0.0.1", port, false, NG_JOIN_CREATE, NULL, &r);
 
     // Pump A until it has a room code.
     for (int i = 0; i < 2000 && a.code[0] == '\0'; i++) pump(&a);
     CHECK(a.code[0] != '\0');
     printf("  room code: %s\n", a.code);
 
-    netgame_start(&b, "127.0.0.1", port, NG_JOIN_CODE, a.code, NULL);
+    netgame_start(&b, "127.0.0.1", port, false, NG_JOIN_CODE, a.code, NULL);
 
     // Play. On its own turn each client runs the real AI over its redacted
     // view (its own rack and the public table are all ai_choose needs), so

@@ -59,6 +59,7 @@ typedef struct {
     Rules    rules;             // create parameters
     char     host[128];
     int      port;
+    bool     tls;              // wss:// vs ws://
     bool     rejoining;         // reconnect in flight: send `rejoin`, not intent
     bool     greeted;           // we've sent our post-`hi` intent this connect
 } NetGame;
@@ -66,7 +67,7 @@ typedef struct {
 // Open a session. `join` selects the flow; `code` is used for NG_JOIN_CODE.
 // `rules` supplies create parameters (players/bonus/partners/target); ignored
 // for quick/join.
-void netgame_start(NetGame* ng, const char* host, int port,
+void netgame_start(NetGame* ng, const char* host, int port, bool tls,
                    NgJoin join, const char* code, const Rules* rules);
 
 // One frame: pump the socket, apply any arrived state, advance the local

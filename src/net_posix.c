@@ -1,8 +1,16 @@
 // POSIX WebSocket client backend for net.h — desktop native (Linux/macOS) and
 // the loopback tests. Hand-written client half of RFC 6455 (client frames are
 // masked, server frames are not), so the repo still vendors no network
-// library. Nonblocking throughout: net_poll drives the TCP connect, the
-// handshake, and framed I/O without ever blocking the render loop.
+// library. Nonblocking throughout: net_poll drives the TCP connect, an
+// optional TLS handshake, the WebSocket handshake, and framed I/O without ever
+// blocking the render loop.
+//
+// wss:// support (OR_TLS) is a thin byte-transport shim over OpenSSL — the
+// framing code is unchanged and just reads/writes through t_read/t_write,
+// which pick SSL_read/SSL_write or the raw socket. Built with OR_TLS on the
+// Linux/macOS desktop targets (linking -lssl -lcrypto, as the game already
+// links system libraries); without it, a tls request fails cleanly and only
+// ws:// works (the Windows/mingw path, until a SChannel backend lands).
 //
 // Not compiled on Windows (winsock) or the web/mobile builds — those select a
 // different net_*.c in the Makefile.
@@ -30,15 +38,26 @@
 #include <time.h>
 #include <unistd.h>
 
+#ifdef OR_TLS
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+#endif
+
 #define NET_IN_CAP   16384
 #define NET_OUT_CAP  16384
 #define NET_MSGQ     32
 #define NET_MSG_CAP  2048
 
+// Transport shim return sentinels (distinct from a byte count >= 0).
+#define T_AGAIN (-2)   // would block; retry on the next poll
+#define T_ERR   (-1)   // fatal transport error
+
 struct NetConn {
     int      fd;
     NetStatus status;
-    bool     handshaking;   // TCP up, waiting for the 101 response
+    bool     handshaking;   // TCP/TLS up, waiting for the 101 response
+    bool     tls;           // wss:// — bytes go through OpenSSL
+    bool     tls_done;      // TLS handshake complete
     char     req[256];      // the upgrade request, sent as the socket drains
     size_t   req_sent;
 
@@ -52,6 +71,10 @@ struct NetConn {
     int      q_head, q_tail;
 
     uint64_t rng;
+#ifdef OR_TLS
+    SSL_CTX* ctx;
+    SSL*     ssl;
+#endif
 };
 
 static uint64_t rng_next(uint64_t* s) {
@@ -77,15 +100,69 @@ static void b64(const uint8_t* in, size_t len, char* out) {
     out[o] = '\0';
 }
 
-NetConn* net_connect(const char* host, int port, const char* path) {
+// --- Transport shim: raw socket, or OpenSSL when tls ------------------------
+static int t_write(NetConn* c, const void* buf, size_t len) {
+#ifdef OR_TLS
+    if (c->tls) {
+        int n = SSL_write(c->ssl, buf, (int)len);
+        if (n > 0) return n;
+        int e = SSL_get_error(c->ssl, n);
+        if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) return T_AGAIN;
+        return T_ERR;
+    }
+#endif
+    ssize_t n = write(c->fd, buf, len);
+    if (n >= 0) return (int)n;
+    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) return T_AGAIN;
+    return T_ERR;
+}
+
+// Returns bytes read (>0), 0 on clean close, T_AGAIN, or T_ERR.
+static int t_read(NetConn* c, void* buf, size_t len) {
+#ifdef OR_TLS
+    if (c->tls) {
+        int n = SSL_read(c->ssl, buf, (int)len);
+        if (n > 0) return n;
+        int e = SSL_get_error(c->ssl, n);
+        if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) return T_AGAIN;
+        if (e == SSL_ERROR_ZERO_RETURN) return 0;   // clean TLS close_notify
+        return T_ERR;
+    }
+#endif
+    ssize_t n = read(c->fd, buf, len);
+    if (n > 0) return (int)n;
+    if (n == 0) return 0;
+    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) return T_AGAIN;
+    return T_ERR;
+}
+
+// Drive the TLS handshake. Returns 1 done, 0 in progress, -1 error.
+static int tls_step(NetConn* c) {
+#ifdef OR_TLS
+    int r = SSL_connect(c->ssl);
+    if (r == 1) return 1;
+    int e = SSL_get_error(c->ssl, r);
+    if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) return 0;
+    return -1;
+#else
+    (void)c; return -1;
+#endif
+}
+
+NetConn* net_connect(const char* host, int port, const char* path, bool tls) {
     NetConn* c = calloc(1, sizeof *c);
     if (!c) return NULL;
     c->fd = -1;
     c->status = NET_CONNECTING;
     c->handshaking = true;
+    c->tls = tls;
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     c->rng = (uint64_t)ts.tv_nsec * 2654435761u + (uint64_t)ts.tv_sec + (uintptr_t)c;
+
+#ifndef OR_TLS
+    if (tls) { c->status = NET_ERROR; return c; }   // TLS not built in
+#endif
 
     char portstr[8];
     snprintf(portstr, sizeof portstr, "%d", port);
@@ -107,15 +184,33 @@ NetConn* net_connect(const char* host, int port, const char* path) {
     if (rc != 0 && errno != EINPROGRESS) { close(fd); c->status = NET_ERROR; return c; }
     c->fd = fd;
 
+#ifdef OR_TLS
+    if (tls) {
+        c->ctx = SSL_CTX_new(TLS_client_method());
+        if (!c->ctx) { c->status = NET_ERROR; return c; }
+        SSL_CTX_set_default_verify_paths(c->ctx);           // system CA store
+        SSL_CTX_set_verify(c->ctx, SSL_VERIFY_PEER, NULL);
+        SSL_CTX_set_min_proto_version(c->ctx, TLS1_2_VERSION);
+        c->ssl = SSL_new(c->ctx);
+        if (!c->ssl) { c->status = NET_ERROR; return c; }
+        SSL_set_fd(c->ssl, fd);
+        SSL_set_tlsext_host_name(c->ssl, host);             // SNI
+        SSL_set1_host(c->ssl, host);                        // verify the hostname
+        SSL_set_connect_state(c->ssl);
+    }
+#endif
+
     uint8_t key[16];
     for (int i = 0; i < 16; i++) key[i] = (uint8_t)(rng_next(&c->rng) >> 24);
     char key64[25];
     b64(key, 16, key64);
+    // Host header without the port (matches the Fly edge's routing; the daemon
+    // ignores Host entirely).
     snprintf(c->req, sizeof c->req,
-             "GET %s HTTP/1.1\r\nHost: %s:%d\r\nUpgrade: websocket\r\n"
+             "GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\n"
              "Connection: Upgrade\r\nSec-WebSocket-Key: %s\r\n"
              "Sec-WebSocket-Version: 13\r\n\r\n",
-             path && path[0] ? path : "/", host, port, key64);
+             path && path[0] ? path : "/", host, key64);
     return c;
 }
 
@@ -152,13 +247,14 @@ static void enqueue_frame(NetConn* c, int opcode, const uint8_t* data, size_t le
 
 static void try_write(NetConn* c) {
     while (c->out_len > 0) {
-        ssize_t n = write(c->fd, c->out, c->out_len);
+        int n = t_write(c, c->out, c->out_len);
         if (n > 0) {
             memmove(c->out, c->out + n, c->out_len - (size_t)n);
             c->out_len -= (size_t)n;
+        } else if (n == T_AGAIN) {
+            return;
         } else {
-            if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
-                c->status = NET_ERROR;
+            c->status = NET_ERROR;
             return;
         }
     }
@@ -193,14 +289,10 @@ static void try_read(NetConn* c) {
         // decode_frame reports that as a protocol error below — erroring here
         // would instead drop a buffer full of perfectly valid frames.
         if (c->in_len == NET_IN_CAP) break;
-        ssize_t n = read(c->fd, c->in + c->in_len, NET_IN_CAP - c->in_len);
+        int n = t_read(c, c->in + c->in_len, NET_IN_CAP - c->in_len);
         if (n == 0) { c->status = NET_CLOSED; return; }
-        if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-            if (errno == EINTR) continue;
-            c->status = NET_ERROR;
-            return;
-        }
+        if (n == T_AGAIN) break;
+        if (n < 0) { c->status = NET_ERROR; return; }
         c->in_len += (size_t)n;
     }
 
@@ -247,25 +339,33 @@ void net_poll(NetConn* c) {
     if (!c || c->fd < 0) return;
     if (c->status == NET_ERROR || c->status == NET_CLOSED) return;
 
+    // TLS handshake first (before any WebSocket bytes). Confirm the TCP
+    // connect result once so a refused/unreachable host fails fast.
+    if (c->tls && !c->tls_done) {
+        int err = 0; socklen_t sl = sizeof err;
+        if (getsockopt(c->fd, SOL_SOCKET, SO_ERROR, &err, &sl) != 0 || err != 0) {
+            if (err != 0) { c->status = NET_ERROR; return; }
+        }
+        int h = tls_step(c);
+        if (h < 0) { c->status = NET_ERROR; return; }
+        if (h == 0) return;   // still negotiating
+        c->tls_done = true;
+    }
+
     if (c->handshaking && c->req_sent < strlen(c->req)) {
-        // Confirm the async connect succeeded, then push the request.
-        if (c->req_sent == 0) {
+        // Confirm the async TCP connect for the plain path (TLS did it above).
+        if (!c->tls && c->req_sent == 0) {
             int err = 0; socklen_t sl = sizeof err;
             if (getsockopt(c->fd, SOL_SOCKET, SO_ERROR, &err, &sl) != 0 || err != 0) {
-                // Still connecting is fine (EINPROGRESS clears err to 0 once up);
-                // a real error trips here.
                 if (err != 0) { c->status = NET_ERROR; return; }
             }
         }
         size_t total = strlen(c->req);
         while (c->req_sent < total) {
-            ssize_t n = write(c->fd, c->req + c->req_sent, total - c->req_sent);
+            int n = t_write(c, c->req + c->req_sent, total - c->req_sent);
             if (n > 0) c->req_sent += (size_t)n;
-            else {
-                if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
-                    c->status = NET_ERROR;
-                break;
-            }
+            else if (n == T_AGAIN) break;
+            else { c->status = NET_ERROR; break; }
         }
     }
 
@@ -303,8 +403,15 @@ void net_close(NetConn* c) {
             enqueue_frame(c, 0x8, NULL, 0);   // best-effort close frame
             try_write(c);
         }
+#ifdef OR_TLS
+        if (c->ssl) SSL_shutdown(c->ssl);
+#endif
         close(c->fd);
     }
+#ifdef OR_TLS
+    if (c->ssl) SSL_free(c->ssl);
+    if (c->ctx) SSL_CTX_free(c->ctx);
+#endif
     free(c);
 }
 
