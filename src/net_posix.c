@@ -24,7 +24,7 @@
 #include <stdio.h>
 
 #if !defined(PLATFORM_WEB) && !defined(PLATFORM_ANDROID) && \
-    !defined(PLATFORM_IOS) && !defined(_WIN32)
+    !defined(PLATFORM_IOS) && !defined(_WIN32) && !defined(OR_NET_APPLE)
 
 #include <arpa/inet.h>
 #include <errno.h>

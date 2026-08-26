@@ -121,21 +121,22 @@ $(OUT_WIN32): $(WIN32_OBJ)
 # Xcode toolchain. raylib links several system frameworks for windowing, input,
 # and OpenGL.
 #
-# No OR_TLS here: homebrew's OpenSSL ships a single-arch (arm64) dylib, which a
-# universal binary can't link for the x86_64 slice. The online client is
-# plain-ws on macOS until a Secure Transport / Network.framework backend lands
-# (same follow-up as Windows/SChannel); macOS reaches the public wss server via
-# a local tunnel meanwhile. Linux gets wss directly (system OpenSSL is fat).
+# wss:// online play comes from net_apple.mm (Network.framework — native
+# WebSocket + TLS, no OpenSSL), so this universal build needs no vendored
+# crypto. -DOR_NET_APPLE selects it and compiles net_posix.c out; the one .mm is
+# built with clang++ and linked with -framework Network.
 # ---------------------------------------------------------------------------
 RAYLIB_MAC  := third_party/raylib-install-mac
 MAC_CC      := clang
 MAC_ARCHES  := -arch arm64 -arch x86_64
-MAC_CFLAGS  := $(CFLAGS_COMMON) -O2 $(MAC_ARCHES) -I$(RAYLIB_MAC)/include
+MAC_CFLAGS  := $(CFLAGS_COMMON) -O2 $(MAC_ARCHES) -DOR_NET_APPLE -I$(RAYLIB_MAC)/include
+MAC_MMFLAGS := -std=c++14 -Wall -Wextra -Isrc -O2 $(MAC_ARCHES) -DOR_NET_APPLE
 MAC_LDFLAGS := $(MAC_ARCHES) -L$(RAYLIB_MAC)/lib -lraylib -lpthread \
-               -framework Cocoa -framework IOKit -framework CoreVideo -framework OpenGL
+               -framework Cocoa -framework IOKit -framework CoreVideo -framework OpenGL \
+               -framework Network
 
 MAC_OBJ_DIR := build/obj-mac
-MAC_OBJ := $(SRC:src/%.c=$(MAC_OBJ_DIR)/%.o)
+MAC_OBJ := $(SRC:src/%.c=$(MAC_OBJ_DIR)/%.o) $(MAC_OBJ_DIR)/net_apple.o
 OUT_MAC := build/openrackem-mac
 
 mac: $(OUT_MAC)
@@ -143,8 +144,13 @@ mac: $(OUT_MAC)
 $(MAC_OBJ_DIR)/%.o: src/%.c | $(MAC_OBJ_DIR)
 	$(MAC_CC) $(MAC_CFLAGS) -MMD -MP -c $< -o $@
 
+$(MAC_OBJ_DIR)/net_apple.o: src/net_apple.mm src/net.h | $(MAC_OBJ_DIR)
+	clang++ $(MAC_MMFLAGS) -c $< -o $@
+
+# clang++ links the final binary: the .mm object needs libc++ and the Obj-C
+# runtime (pulled in by -framework Network).
 $(OUT_MAC): $(MAC_OBJ)
-	$(MAC_CC) $(MAC_OBJ) -o $@ $(MAC_LDFLAGS)
+	clang++ $(MAC_OBJ) -o $@ $(MAC_LDFLAGS)
 
 # ---------------------------------------------------------------------------
 # Android build (NativeActivity APK, no Gradle). CI-only: needs the NDK + SDK
@@ -418,13 +424,19 @@ IOS_TEAM_ID       ?=
 IOS_C_SRC      := src/rules.c src/game.c src/ai.c src/tick.c src/main.c \
                   src/render.c src/render_portrait.c src/render_landscape.c \
                   src/input.c src/sound.c src/recorder.c src/safe_area.c \
-                  src/netgame.c src/net_stub.c
+                  src/netgame.c
 IOS_MM_SRC     := ios/ios_main.mm ios/gfx_metal.mm ios/plat_ios.mm ios/audio_ios.mm
+# The online client (net_apple.mm, Network.framework) is Obj-C++ compiled
+# WITHOUT ARC (it hand-retains nw_/dispatch objects held in a C struct), so it
+# gets its own compile line rather than the ARC IOS_MMFLAGS.
+IOS_NET_SRC    := src/net_apple.mm
 IOS_CFLAGS     := -std=c99   -Wall -Wextra -Isrc -Iios -DPLATFORM_IOS -O2
-IOS_MMFLAGS    := -std=c++14 -fobjc-arc -Wall -Wextra -Isrc -Iios -DPLATFORM_IOS -O2
+IOS_MMFLAGS    := -std=c++14 -fobjc-arc    -Wall -Wextra -Isrc -Iios -DPLATFORM_IOS -O2
+IOS_NETFLAGS   := -std=c++14 -fno-objc-arc -Wall -Wextra -Isrc -Iios -DPLATFORM_IOS -O2
 IOS_FRAMEWORKS := -framework UIKit -framework Metal -framework QuartzCore \
-                  -framework CoreGraphics -framework AVFoundation -framework Foundation
-IOS_DEPS       := $(IOS_C_SRC) $(IOS_MM_SRC) $(wildcard src/*.h ios/*.h) ios/Info.plist \
+                  -framework CoreGraphics -framework AVFoundation -framework Foundation \
+                  -framework Network
+IOS_DEPS       := $(IOS_C_SRC) $(IOS_MM_SRC) $(IOS_NET_SRC) $(wildcard src/*.h ios/*.h) ios/Info.plist \
                   $(wildcard ios/Assets.xcassets/*/* ios/Assets.xcassets/*)
 
 # $(call ios_build,<sdk>,<target-triple>,<app-dir>,<obj-dir>) — compile + link
@@ -433,6 +445,7 @@ define ios_build
 	@rm -rf $(4) && mkdir -p $(3) $(4)
 	for f in $(IOS_C_SRC);  do xcrun -sdk $(1) clang   -target $(2) $(IOS_CFLAGS)  -c $$f -o $(4)/$$(basename $$f .c).o  || exit 1; done
 	for f in $(IOS_MM_SRC); do xcrun -sdk $(1) clang++ -target $(2) $(IOS_MMFLAGS) -c $$f -o $(4)/$$(basename $$f .mm).o || exit 1; done
+	xcrun -sdk $(1) clang++ -target $(2) $(IOS_NETFLAGS) -c $(IOS_NET_SRC) -o $(4)/net_apple.o
 	xcrun -sdk $(1) clang++ -target $(2) $(4)/*.o $(IOS_FRAMEWORKS) -o $(3)/$(IOS_APP_NAME)
 	cp ios/Info.plist $(3)/Info.plist
 endef
@@ -629,6 +642,36 @@ $(NET_E2E_BIN): tests/net_e2e.c src/netgame.c src/net_posix.c \
 	gcc -std=c99 -Wall -Wextra -O0 -g -Isrc tests/net_e2e.c src/netgame.c \
 	    src/net_posix.c src/rules.c src/game.c src/ai.c -o $(NET_E2E_BIN)
 
+# Live-server smoke test: two headless clients connect to the REAL deployed
+# daemon and create+join a game, proving the wss/TLS transport end to end.
+# Linux variant links net_posix + system OpenSSL. Needs network egress to
+# openrackem-server.fly.dev; override with H=/P=/TLS=.
+NET_LIVE_BIN := build/net_live
+
+net-live: $(NET_LIVE_BIN)
+	./$(NET_LIVE_BIN)
+
+$(NET_LIVE_BIN): tests/net_live.c src/netgame.c src/net_posix.c \
+                 src/rules.c src/game.c src/ai.c $(wildcard src/*.h) | $(OBJ_DIR)
+	gcc -std=c99 -Wall -Wextra -O0 -g -Isrc $(TLS_CFLAGS) tests/net_live.c \
+	    src/netgame.c src/net_posix.c src/rules.c src/game.c src/ai.c \
+	    -o $(NET_LIVE_BIN) $(TLS_LIBS)
+
+# macOS: the same live smoke test, linking the Network.framework backend
+# (net_apple.mm) — how CI functionally verifies the Apple online client on a
+# real macOS runner. net_apple.mm is Obj-C++ without ARC; the .c sources are C.
+mac-net-test: | $(MAC_OBJ_DIR)
+	$(MAC_CC) $(MAC_CFLAGS) -c tests/net_live.c -o $(MAC_OBJ_DIR)/net_live.o
+	$(MAC_CC) $(MAC_CFLAGS) -c src/netgame.c    -o $(MAC_OBJ_DIR)/netgame_t.o
+	$(MAC_CC) $(MAC_CFLAGS) -c src/rules.c      -o $(MAC_OBJ_DIR)/rules_t.o
+	$(MAC_CC) $(MAC_CFLAGS) -c src/game.c       -o $(MAC_OBJ_DIR)/game_t.o
+	$(MAC_CC) $(MAC_CFLAGS) -c src/ai.c         -o $(MAC_OBJ_DIR)/ai_t.o
+	clang++ $(MAC_MMFLAGS) -c src/net_apple.mm  -o $(MAC_OBJ_DIR)/net_apple_t.o
+	clang++ $(MAC_ARCHES) $(MAC_OBJ_DIR)/net_live.o $(MAC_OBJ_DIR)/netgame_t.o \
+	    $(MAC_OBJ_DIR)/rules_t.o $(MAC_OBJ_DIR)/game_t.o $(MAC_OBJ_DIR)/ai_t.o \
+	    $(MAC_OBJ_DIR)/net_apple_t.o -framework Network -o build/mac-net-test
+	./build/mac-net-test
+
 # ---------------------------------------------------------------------------
 # Distribution archives. Each dist-<platform> stages the platform binary plus
 # README.md + LICENSE + NOTICE and packages it under dist/. Driven by the
@@ -692,6 +735,6 @@ clean:
 # Pull in auto-generated header dependencies (ignored if not yet present).
 -include $(OBJ:.o=.d) $(REL_OBJ:.o=.d) $(WIN64_OBJ:.o=.d) $(WIN32_OBJ:.o=.d) $(MAC_OBJ:.o=.d)
 
-.PHONY: all run release run-release windows mac web web-serve test ai-bench shots server server-run net-e2e clean \
+.PHONY: all run release run-release windows mac web web-serve test ai-bench shots server server-run net-e2e net-live mac-net-test clean \
         android android-play ios ios-sim \
         dist dist-linux dist-windows dist-mac dist-web dist-android dist-android-play dist-ios
