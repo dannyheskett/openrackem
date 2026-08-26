@@ -18,7 +18,7 @@ SRC := src/main.c src/rules.c src/game.c src/ai.c src/tick.c src/input.c \
        src/render.c src/render_portrait.c src/render_landscape.c src/gfx_raylib.c \
        src/safe_area.c \
        src/sound.c src/audio_raylib.c \
-       src/netgame.c src/net_posix.c src/net_stub.c \
+       src/netgame.c src/net_posix.c src/net_stub.c src/net_web.c \
        src/recorder.c src/encode_h264.c src/encode_mux.c
 
 # Shared standard/warning flags and vendored-header include paths.
@@ -366,8 +366,9 @@ WEB_CFLAGS  := -std=c99 -Wall -Wextra -Isrc -DPLATFORM_WEB -Os \
                -I$(RAYLIB_WEB)/include
 # Fixed memory (not ALLOW_MEMORY_GROWTH): a growable WASM heap yields resizable
 # ArrayBuffers, which modern browsers reject in WebGL texImage2D. 64 MiB is ample
-# for this game.
-WEB_LDFLAGS := -Os -sUSE_GLFW=3 -sINITIAL_MEMORY=67108864 \
+# for this game. -lwebsocket.js provides the emscripten_websocket_* runtime the
+# online client (net_web.c) needs — without it those symbols fail to link.
+WEB_LDFLAGS := -Os -sUSE_GLFW=3 -sINITIAL_MEMORY=67108864 -lwebsocket.js \
                --shell-file web/shell.html $(RAYLIB_WEB)/lib/libraylib.a
 
 WEB_OUT_DIR := build/web
