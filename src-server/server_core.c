@@ -385,7 +385,11 @@ static void applied_action(Srv* s, Room* rm, int seat, Action a, int card_pub,
     broadcast_state(s, rm, seat, a.type, a.slot, card_pub, now);
 }
 
-// The card an observer saw during this action, before it is applied.
+// The card an observer saw during this action, before it is applied. Runs on
+// UNVALIDATED client input by design (it captures the pre-apply table), so it
+// must bounds-check every client-controlled index itself — a hostile
+// {"a":2,"slot":250} otherwise reads past the 10-slot rack. An out-of-range
+// slot returns 0; game_apply then rejects the action anyway.
 static int observed_card(const Room* rm, Action a) {
     const Game* g = &rm->g;
     switch (a.type) {
@@ -393,7 +397,7 @@ static int observed_card(const Room* rm, Action a) {
         return g->discard_count ? g->discard[g->discard_count - 1] : 0;
     case ACTION_PLACE:
         // The displaced card lands face up on the pile.
-        return g->players[g->turn].rack.slots[a.slot];
+        return (a.slot < RACK_SLOTS) ? g->players[g->turn].rack.slots[a.slot] : 0;
     case ACTION_DISCARD:
         return g->held_card; // thrown face up
     default:

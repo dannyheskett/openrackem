@@ -341,6 +341,23 @@ static void test_wire_redaction(void) {
 
     // Nothing anywhere on the wire ever carries the seed.
     CHECK(strstr(st_actor, "seed") == NULL && strstr(st_other, "seed") == NULL);
+
+    // A hostile out-of-range slot must be rejected without an OOB rack read
+    // (observed_card runs pre-validation): the action errors, state unchanged.
+    uint8_t phase_before = rm->g.phase;
+    int turn_before = rm->g.turn;
+    say(rm->g.turn, "{\"t\":\"action\",\"a\":2,\"slot\":250}");
+    CHECK(last_msg(actor, "error") != NULL || last_msg(other, "error") != NULL);
+    CHECK(rm->g.phase == phase_before && rm->g.turn == turn_before);
+
+    // The same call on a heap Room, so a slot past the rack would read off the
+    // end of the allocation — ASan traps the regression here (intra-object,
+    // it stayed silent). The bounds check makes this return 0.
+    Room* hr = malloc(sizeof *hr);
+    memcpy(hr, rm, sizeof *hr);
+    CHECK(observed_card(hr, (Action){ACTION_PLACE, 250}) == 0);
+    CHECK(observed_card(hr, (Action){ACTION_PLACE, 255}) == 0);
+    free(hr);
 }
 
 // --- Turn clock, takeover, disconnect, rejoin --------------------------------
