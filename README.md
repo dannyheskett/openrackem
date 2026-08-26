@@ -84,8 +84,10 @@ assembled `.ipa`, no Xcode project). CI builds all of these on every PR; see
 anonymous seat tokens with reconnect, turn clocks with AI takeover, and
 per-seat redacted state over WebSocket. Single-threaded with fixed pools —
 one tiny fly.io machine holds a thousand concurrent tables (`fly deploy`
-with the included `fly.toml` / `Dockerfile.server`). The in-game client UI
-is not wired up yet; see `docs/PLAN-MULTIPLAYER.md`.
+with the included `fly.toml` / `Dockerfile.server`). The desktop app has a
+**Play Online** menu (Quick Match, Create Table, Join by Code) that speaks to
+it; point it at a daemon with `OPENRACKEM_SERVER` / `OPENRACKEM_PORT`
+(default `127.0.0.1:8080`). See `docs/PLAN-MULTIPLAYER.md`.
 
 ## Architecture notes
 

@@ -192,8 +192,15 @@ phase, plus the seed/rng zeroing pinned. Nothing else in the engine changes.
 
 ## 10. Milestones
 
-Status 2026-08-26: **N0 and N1 are implemented and tested** (`make server`,
-`make test`, `Dockerfile.server`, `fly.toml`); N2 (the client) is next.
+Status 2026-08-26: **N0, N1, and N2 are implemented and tested**. The daemon
+(`make server`, `Dockerfile.server`, `fly.toml`) and the desktop online client
+(Play Online → Quick Match / Create Table / Join by Code, wired to the real
+daemon) both work; a full match plays over loopback in CI (`make net-e2e`).
+Native uses a from-scratch plain-WebSocket client (`net_posix.c`); the web
+build stubs online for now (browser wss + emscripten WebSocket is the N3
+follow-up), and a TLS client for the public fly.io wss endpoint is pending —
+today the native client targets a plain-ws daemon set via OPENRACKEM_SERVER /
+OPENRACKEM_PORT (default 127.0.0.1:8080).
 
 - **N0 — Protocol on loopback.** `game_init` + `game_redact_for` + tests;
   protocol spec frozen; headless daemon core with the loopback harness in CI.
