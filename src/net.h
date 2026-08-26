@@ -25,6 +25,13 @@ typedef enum {
 
 typedef struct NetConn NetConn;
 
+// net_apple.mm compiles as Objective-C++, so the seam must export C linkage or
+// its definitions would mangle and the C callers (main.c/netgame.c) wouldn't
+// resolve them. Harmless to the C backends (no compiler defines __cplusplus).
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // Begin connecting to host:port at `path`. `tls` selects wss:// (TLS via the
 // system OpenSSL, verifying the server certificate and hostname) vs plain
 // ws://. Non-blocking: returns a handle immediately (status NET_CONNECTING) or
@@ -49,5 +56,9 @@ void net_close(NetConn* c);
 
 // True on builds that actually ship an online client (menu gating).
 bool net_available(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // OPENRACKEM_NET_H
