@@ -1,0 +1,43 @@
+# Build output
+build/
+dist/
+*.o
+*.a
+*.so
+*.exe
+*.obj
+
+# Vendored raylib, built from source by scripts/build_raylib_<platform>.sh
+third_party/raylib/
+third_party/raylib-install*/
+
+# Gameplay recordings written by src/recorder.c into the repo root
+*.mp4
+
+# Local agent state. `.claude/*` rather than `.claude/` because git cannot
+# re-include a path whose parent directory is excluded, and committed skills
+# must stay tracked.
+.claude/*
+!.claude/skills/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# --- openrackem only ---
+# Play signing material. Never commit these: the release workflow decodes the
+# keystore from a secret at build time.
+*.jks
+*.keystore
+*.p12
+*.b64
+
+# Tooling scratch
+.playwright-mcp/
+__pycache__/
+*.pyc
