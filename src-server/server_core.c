@@ -318,19 +318,31 @@ static void drive_deal(Room* rm) {
 // is presentation and plays no part here: the server never calls game_update
 // outside the deal skip, so engine AI never fires on its own.
 static void schedule(Srv* s, Room* rm, int64_t now) {
+    (void)s;
     rm->turn_deadline = 0;
     rm->ai_due = 0;
-    rm->reveal_deadline = 0;
-    (void)s;
     if (rm->g.phase == PHASE_DRAW || rm->g.phase == PHASE_PLACE) {
+        rm->reveal_deadline = 0;
         if (seat_human_active(rm, rm->g.turn)) {
             rm->turn_deadline = now + SRV_TURN_MS;
         } else {
             rm->ai_due = now + (any_connected_human(rm) ? SRV_AI_PACE_MS : 0);
         }
     } else if (rm->g.phase == PHASE_ROUND_OVER) {
-        rm->reveal_deadline = now + SRV_REVEAL_MS;
-        for (int i = 0; i < MAX_PLAYERS; i++) rm->seats[i].confirmed = false;
+        // Arm the reveal backstop and clear confirmations exactly ONCE, on
+        // entry (reveal_deadline is 0 coming out of play). schedule() also
+        // fires on every seat event — disconnect, leave, rejoin — and those
+        // must NOT push the deadline forward or wipe confirmations: otherwise
+        // a client that flaps its socket faster than SRV_REVEAL_MS keeps
+        // nulling the other humans' `next` votes and resetting the timer,
+        // holding the whole table in the reveal screen forever (the backstop
+        // this branch exists to guarantee). Idempotent past the first call.
+        if (rm->reveal_deadline == 0) {
+            rm->reveal_deadline = now + SRV_REVEAL_MS;
+            for (int i = 0; i < MAX_PLAYERS; i++) rm->seats[i].confirmed = false;
+        }
+    } else {
+        rm->reveal_deadline = 0;
     }
 }
 

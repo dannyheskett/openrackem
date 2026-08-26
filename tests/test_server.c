@@ -549,6 +549,68 @@ static void test_many_tables(void) {
     printf("  (200 concurrent tables all completed and recycled)\n");
 }
 
+// --- Reveal backstop survives a flapping client ------------------------------
+// A client that drops and rejoins at round-over must not be able to wipe the
+// other seats' confirmations or push the reveal timer forward forever.
+static void test_reveal_backstop(void) {
+    fresh_server();
+    connect_hello(0, "1.1.1.1");
+    connect_hello(1, "2.2.2.2");
+    say(0, "{\"t\":\"create\",\"players\":2}");
+    char code[8], join[64], tok1[40];
+    jstr(last_msg(0, "welcome"), "code", code, sizeof code);
+    snprintf(join, sizeof join, "{\"t\":\"join\",\"code\":\"%s\"}", code);
+    say(1, join);
+    jstr(last_msg(1, "welcome"), "token", tok1, sizeof tok1);
+
+    Room* rm = &S->rooms[0];
+    int slot = 0;
+    for (int i = 0; i < 500 && rm->g.phase != PHASE_ROUND_OVER; i++) {
+        int actor = rm->g.turn;
+        say(actor, "{\"t\":\"action\",\"a\":0}");
+        char place[64];
+        snprintf(place, sizeof place, "{\"t\":\"action\",\"a\":2,\"slot\":%d}", slot);
+        slot = (slot + 1) % RACK_SLOTS;
+        if (rm->g.phase == PHASE_PLACE) say(actor, place);
+        NOW += 100;
+    }
+    CHECK(rm->g.phase == PHASE_ROUND_OVER);
+
+    // Seat 0 confirms; capture the reveal deadline.
+    say(0, "{\"t\":\"next\"}");
+    CHECK(rm->seats[0].confirmed);
+    int64_t deadline0 = rm->reveal_deadline;
+    CHECK(deadline0 != 0);
+
+    // Seat 1 flaps its socket repeatedly. Kept inside the reveal window (no
+    // time advanced) so the assertions isolate the bug itself: pre-fix, each
+    // disconnect/rejoin wiped seat 0's confirmation and pushed the deadline to
+    // now+SRV_REVEAL_MS; post-fix both are stable.
+    int nid = 7;
+    for (int f = 0; f < 6; f++) {
+        srv_client_gone(S, f == 0 ? 1 : nid - 1, NOW);
+        CHECK(rm->seats[0].confirmed);             // survives the disconnect
+        CHECK(rm->reveal_deadline == deadline0);   // timer not pushed forward
+        connect_hello(nid, "2.2.2.2");
+        char rejoin[80];
+        snprintf(rejoin, sizeof rejoin, "{\"t\":\"rejoin\",\"token\":\"%s\"}", tok1);
+        say(nid, rejoin);
+        CHECK(rm->seats[0].confirmed);             // rejoin doesn't wipe it
+        CHECK(rm->reveal_deadline == deadline0);
+        nid++;
+    }
+
+    // The backstop fires on schedule: past the original deadline, the round
+    // advances even though seat 1 (connected but never confirmed) is blocking
+    // consensus.
+    CHECK(rm->seats[1].connected && rm->seats[1].client == nid - 1);
+    CHECK(!rm->seats[1].confirmed);   // the flapper never voted
+    while (rm->active && rm->g.phase == PHASE_ROUND_OVER && NOW < deadline0 + 60000) {
+        tick_ms(1000);
+    }
+    CHECK(rm->g.phase != PHASE_ROUND_OVER);   // moved on (new deal or finished)
+}
+
 // --- Audit log replays byte-for-byte ------------------------------------------
 static void test_audit_replay(void) {
     fresh_server();
@@ -643,6 +705,7 @@ int main(void) {
     test_quick_match();
     test_abuse();
     test_many_tables();
+    test_reveal_backstop();
     test_audit_replay();
     test_status();
     test_creator_leaves();
