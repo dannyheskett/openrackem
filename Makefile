@@ -24,6 +24,16 @@ SRC := src/main.c src/rules.c src/game.c src/ai.c src/tick.c src/input.c \
 # Shared standard/warning flags and vendored-header include paths.
 CFLAGS_COMMON := -std=c99 -Wall -Wextra -I$(MINIH264_INC) -I$(MINIMP4_INC) -Isrc
 
+# TLS for the native online client's wss:// support (net_posix.c). Detected via
+# pkg-config so the desktop builds link the system OpenSSL, exactly as they link
+# raylib / X11 / GL. Absent -> OR_TLS undefined and the client is plain-ws only
+# (the Windows/mingw path, which never compiles net_posix.c anyway). On macOS
+# CI, point PKG_CONFIG_PATH at brew's openssl@3 so this resolves.
+ifeq ($(shell pkg-config --exists openssl 2>/dev/null && echo yes),yes)
+TLS_CFLAGS := -DOR_TLS $(shell pkg-config --cflags openssl)
+TLS_LIBS   := $(shell pkg-config --libs openssl)
+endif
+
 # Release version: a single integer. The release workflow passes
 # OPENRACKEM_VERSION explicitly; for local `make dist` it derives from the
 # latest release-N tag (or 0 if there are none). Only used to name archives.
@@ -37,10 +47,10 @@ VERSION_SLUG       := build-$(OPENRACKEM_VERSION)
 # ---------------------------------------------------------------------------
 # Linux (dev + release, static linking)
 # ---------------------------------------------------------------------------
-CFLAGS   := $(CFLAGS_COMMON) -O2 -I$(RAYLIB)/include
-RELFLAGS := $(CFLAGS_COMMON) -O3 -I$(RAYLIB)/include
-# Static link raylib and its dependencies.
-LDFLAGS  := -L$(RAYLIB)/lib -Wl,-Bstatic -lraylib -Wl,-Bdynamic -lm -lpthread -ldl -lrt -lX11
+CFLAGS   := $(CFLAGS_COMMON) -O2 $(TLS_CFLAGS) -I$(RAYLIB)/include
+RELFLAGS := $(CFLAGS_COMMON) -O3 $(TLS_CFLAGS) -I$(RAYLIB)/include
+# Static link raylib and its dependencies; OpenSSL (if present) links dynamic.
+LDFLAGS  := -L$(RAYLIB)/lib -Wl,-Bstatic -lraylib -Wl,-Bdynamic -lm -lpthread -ldl -lrt -lX11 $(TLS_LIBS)
 
 OBJ_DIR     := build/obj
 REL_OBJ_DIR := build/obj-release
@@ -112,9 +122,10 @@ $(OUT_WIN32): $(WIN32_OBJ)
 RAYLIB_MAC  := third_party/raylib-install-mac
 MAC_CC      := clang
 MAC_ARCHES  := -arch arm64 -arch x86_64
-MAC_CFLAGS  := $(CFLAGS_COMMON) -O2 $(MAC_ARCHES) -I$(RAYLIB_MAC)/include
+MAC_CFLAGS  := $(CFLAGS_COMMON) -O2 $(MAC_ARCHES) $(TLS_CFLAGS) -I$(RAYLIB_MAC)/include
 MAC_LDFLAGS := $(MAC_ARCHES) -L$(RAYLIB_MAC)/lib -lraylib -lpthread \
-               -framework Cocoa -framework IOKit -framework CoreVideo -framework OpenGL
+               -framework Cocoa -framework IOKit -framework CoreVideo -framework OpenGL \
+               $(TLS_LIBS)
 
 MAC_OBJ_DIR := build/obj-mac
 MAC_OBJ := $(SRC:src/%.c=$(MAC_OBJ_DIR)/%.o)

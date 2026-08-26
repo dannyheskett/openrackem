@@ -25,10 +25,12 @@ typedef enum {
 
 typedef struct NetConn NetConn;
 
-// Begin connecting to ws host:port at `path`. Non-blocking: returns a handle
-// immediately (status NET_CONNECTING) or NULL if a connection can't be
-// started at all. `origin` may be NULL.
-NetConn* net_connect(const char* host, int port, const char* path);
+// Begin connecting to host:port at `path`. `tls` selects wss:// (TLS via the
+// system OpenSSL, verifying the server certificate and hostname) vs plain
+// ws://. Non-blocking: returns a handle immediately (status NET_CONNECTING) or
+// NULL if a connection can't be started at all. A tls request on a build
+// without TLS support fails to NET_ERROR.
+NetConn* net_connect(const char* host, int port, const char* path, bool tls);
 
 // Pump the transport (handshake progress, reads, writes). Call once per frame.
 void net_poll(NetConn* c);

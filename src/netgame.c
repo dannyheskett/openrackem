@@ -232,7 +232,7 @@ static void send_join_intent(NetGame* ng) {
     }
 }
 
-void netgame_start(NetGame* ng, const char* host, int port,
+void netgame_start(NetGame* ng, const char* host, int port, bool tls,
                    NgJoin join, const char* code, const Rules* rules) {
     memset(ng, 0, sizeof *ng);
     ng->state = NG_CONNECTING;
@@ -243,9 +243,10 @@ void netgame_start(NetGame* ng, const char* host, int port,
     rules_normalize(&ng->rules);
     snprintf(ng->host, sizeof ng->host, "%s", host ? host : "127.0.0.1");
     ng->port = port;
+    ng->tls = tls;
     ng->rejoining = false;
     ng->greeted = false;
-    ng->conn = net_connect(host, port, "/");
+    ng->conn = net_connect(host, port, "/", tls);
     if (!ng->conn) {
         ng->state = NG_ERROR;
         snprintf(ng->err, sizeof ng->err, "no connection");
@@ -260,7 +261,7 @@ unsigned netgame_update(NetGame* ng) {
     if (ng->state == NG_DISCONNECTED && !ng->conn) {
         if (ng->reconnect_delay > 0) { ng->reconnect_delay--; return 0; }
         ng->rejoining = true;
-        ng->conn = net_connect(ng->host, ng->port, "/");
+        ng->conn = net_connect(ng->host, ng->port, "/", ng->tls);
         if (!ng->conn) {
             ng->state = NG_ERROR;
             snprintf(ng->err, sizeof ng->err, "reconnect failed");

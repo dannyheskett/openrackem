@@ -23,7 +23,7 @@ static int failures = 0;
 
 // Faked net backend: netgame.c references these, but the parse tests never
 // call them. (A real backend links in the app build via the Makefile.)
-NetConn* net_connect(const char* h, int p, const char* pa) { (void)h;(void)p;(void)pa; return 0; }
+NetConn* net_connect(const char* h, int p, const char* pa, bool tls) { (void)h;(void)p;(void)pa;(void)tls; return 0; }
 void      net_poll(NetConn* c) { (void)c; }
 NetStatus net_status(const NetConn* c) { (void)c; return NET_ERROR; }
 bool      net_send(NetConn* c, const char* t, size_t l) { (void)c;(void)t;(void)l; return false; }

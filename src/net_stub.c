@@ -8,8 +8,8 @@
 #if defined(PLATFORM_WEB) || defined(PLATFORM_ANDROID) || \
     defined(PLATFORM_IOS) || defined(_WIN32)
 
-NetConn* net_connect(const char* host, int port, const char* path) {
-    (void)host; (void)port; (void)path;
+NetConn* net_connect(const char* host, int port, const char* path, bool tls) {
+    (void)host; (void)port; (void)path; (void)tls;
     return 0;
 }
 void      net_poll(NetConn* c) { (void)c; }
