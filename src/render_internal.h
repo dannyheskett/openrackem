@@ -30,6 +30,21 @@ void draw_center_panel_at(int w, int h, int panel_w, int panel_h, int ts, int ss
                           int title_dy, int sub_dy, const char* title,
                           const char* subtitle, Color title_color);
 
+// A compact rack strip: ten cards of (cw x ch) laid horizontally with a 1px
+// gap, face up or as backs (opponents). Used by both renderers for the
+// opponent panels and the round-over reveal.
+void draw_mini_rack(int x, int y, int cw, int ch, const Rack* rack, bool face_up);
+
+// Seat display name: "YOU" for the human seat, "CPU n" otherwise. Returns a
+// static buffer valid until the next call for that seat.
+const char* seat_name(const Game* g, int seat);
+
+// Deal-animation progress: how many of `seat`'s cards have visibly arrived
+// (they land in slot #50 first, downward), and whether the first discard has
+// been flipped yet. Purely presentation — the full deal exists in the state.
+int  deal_cards_for_seat(const Game* g, int seat);
+bool deal_discard_flipped(const Game* g);
+
 // Table hit zones for touch (captured per frame; read by render_table_hit_test).
 void table_hits_reset(void);
 void table_hit_set(int id, Rectangle r);   // id: 0..9 slots, HIT_STOCK, HIT_DISCARD

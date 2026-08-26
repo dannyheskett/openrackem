@@ -545,6 +545,20 @@ ai-bench: $(AI_BENCH_BIN)
 $(AI_BENCH_BIN): tests/ai_bench.c $(wildcard src/*.c src/*.h) | $(OBJ_DIR)
 	gcc $(CFLAGS_COMMON) -O2 tests/ai_bench.c -o $(AI_BENCH_BIN)
 
+# Deterministic screenshots of every screen in both renderers (needs a
+# display). -DPLATFORM_WEB compiles both renderers into one native binary
+# (OR_RUNTIME_RENDERER); vis_shots.c supplies main(), so the emscripten loop
+# in main.c never enters the build.
+SHOTS_BIN := build/vis_shots
+SHOTS_SRC := $(filter-out src/main.c,$(SRC))
+
+shots: $(SHOTS_BIN)
+	./$(SHOTS_BIN)
+
+$(SHOTS_BIN): tests/vis_shots.c $(wildcard src/*.c src/*.h) | $(OBJ_DIR)
+	gcc $(CFLAGS_COMMON) -O2 -DPLATFORM_WEB -I$(RAYLIB)/include \
+	    tests/vis_shots.c $(SHOTS_SRC) -o $(SHOTS_BIN) $(LDFLAGS)
+
 # ---------------------------------------------------------------------------
 # Distribution archives. Each dist-<platform> stages the platform binary plus
 # README.md + LICENSE + NOTICE and packages it under dist/. Driven by the
@@ -608,6 +622,6 @@ clean:
 # Pull in auto-generated header dependencies (ignored if not yet present).
 -include $(OBJ:.o=.d) $(REL_OBJ:.o=.d) $(WIN64_OBJ:.o=.d) $(WIN32_OBJ:.o=.d) $(MAC_OBJ:.o=.d)
 
-.PHONY: all run release run-release windows mac web web-serve test ai-bench clean \
+.PHONY: all run release run-release windows mac web web-serve test ai-bench shots clean \
         android android-play ios ios-sim \
         dist dist-linux dist-windows dist-mac dist-web dist-android dist-android-play dist-ios

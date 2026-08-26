@@ -356,9 +356,7 @@ static void frame_step(void* arg) {
             cycle_option(c->selected, dir ? dir : 1);
             sound_play(SFX_MENU_SELECT);
         }
-        build_options(opt_labels); // refresh labels after a change
-        render_menu("OPTIONS", opt_labels, opt_count, c->selected, OPT_BACK);
-        return; // options renders its own frame
+        break; // rendered by the per-state dispatch below
     }
 
     case STATE_PLAYING: {
@@ -458,9 +456,15 @@ static void frame_step(void* arg) {
         break;
     }
 
-    // Render for the current state. (STATE_OPTIONS returned above.)
+    // Render for the state we ended the frame in. Every state must be handled
+    // here: a same-frame transition (menu -> options) otherwise falls into a
+    // branch whose data doesn't exist yet (there is no game before New Game).
     if (c->state == STATE_MENU) {
         render_menu("OPENRACKEM", labels, menu_count, c->selected, menu_count - 1);
+    } else if (c->state == STATE_OPTIONS) {
+        const char* opt_labels[OPT_ITEMS];
+        int opt_count = build_options(opt_labels);
+        render_menu("OPTIONS", opt_labels, opt_count, c->selected, OPT_BACK);
     } else if (c->state == STATE_PAUSED) {
         render_pause(c->game, &c->ui);
     } else {

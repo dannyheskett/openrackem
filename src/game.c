@@ -10,12 +10,23 @@
 // --- Presentation pacing (frames at 60 Hz) ---------------------------------
 // These shape how play *looks*, never how it resolves: the deal reveal rate,
 // the card-slide tween, how long the AI "thinks", and how long a finished
-// round lingers in full-AI games before auto-advancing.
+// round lingers in full-AI games before auto-advancing. Overridable from the
+// command line (-DTHINK_DRAW_FRAMES=2 ...) for fast dev/visual-test builds.
+#ifndef DEAL_STEP_FRAMES
 #define DEAL_STEP_FRAMES   2
+#endif
+#ifndef SLIDE_FRAMES
 #define SLIDE_FRAMES      10
+#endif
+#ifndef THINK_DRAW_FRAMES
 #define THINK_DRAW_FRAMES 42
+#endif
+#ifndef THINK_PLACE_FRAMES
 #define THINK_PLACE_FRAMES 26
+#endif
+#ifndef REVEAL_FRAMES
 #define REVEAL_FRAMES    150
+#endif
 
 // Engine safeguard on top of the plan's stalemate assumption: a round that
 // somehow runs this many turns per seat without a recycle-triggered cutoff

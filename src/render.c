@@ -59,6 +59,42 @@ void draw_card_outline(int x, int y, int w, int h) {
     gfx_rect_lines(x, y, w, h, (Color){70, 90, 80, 255});
 }
 
+void draw_mini_rack(int x, int y, int cw, int ch, const Rack* rack, bool face_up) {
+    for (int i = 0; i < RACK_SLOTS; i++) {
+        draw_card(x + i * (cw + 1), y, cw, ch, rack->slots[i], face_up, false);
+    }
+}
+
+const char* seat_name(const Game* g, int seat) {
+    static char buf[MAX_PLAYERS][8];
+    if (seat == g->rules.human_seat) return "YOU";
+    // Number the CPUs 1..k in seat order, skipping the human seat.
+    int n = 0;
+    for (int s = 0; s <= seat; s++) {
+        if (s != g->rules.human_seat) n++;
+    }
+    snprintf(buf[seat], sizeof buf[seat], "CPU %d", n);
+    return buf[seat];
+}
+
+int deal_cards_for_seat(const Game* g, int seat) {
+    int n = g->rules.player_count;
+    int step = g->anim.deal_step;
+    if (g->phase != PHASE_DEAL) return RACK_SLOTS;
+    if (step > n * RACK_SLOTS) step = n * RACK_SLOTS;
+    // Cards go out one at a time starting left of the dealer; this seat has
+    // received one from each completed round of the table, plus one more if
+    // the partial round has already passed it.
+    int pos = (seat - g->dealer - 1 + n) % n;
+    int count = step / n + ((step % n) > pos ? 1 : 0);
+    return (count > RACK_SLOTS) ? RACK_SLOTS : count;
+}
+
+bool deal_discard_flipped(const Game* g) {
+    if (g->phase != PHASE_DEAL) return true;
+    return g->anim.deal_step >= g->rules.player_count * RACK_SLOTS + 1;
+}
+
 // A floating, centered panel with a title and an optional subtitle, drawn over a
 // dimmed background. Shared by the pause overlay and end-of-round banners.
 void draw_center_panel_at(int w, int h, int panel_w, int panel_h, int ts,
