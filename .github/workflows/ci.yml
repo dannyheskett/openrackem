@@ -74,6 +74,8 @@ jobs:
         run: ./scripts/build_raylib_mac.sh
       - name: Build universal binary
         run: make mac
+      - name: Online client smoke test (net_apple.mm -> live wss)
+        run: make mac-net-test
 
   web:
     runs-on: ubuntu-22.04
