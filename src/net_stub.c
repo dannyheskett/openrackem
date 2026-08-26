@@ -1,12 +1,11 @@
 // No-op net.h backend for platforms that don't ship an online client yet
-// (Windows/winsock, web, Android, iOS). net_available() returns false, so
-// main.c hides "Play Online" there. Guarded as the exact inverse of
-// net_posix.c, so precisely one backend provides these symbols per platform
-// and the shared source list links everywhere.
+// (Windows/winsock, Android, iOS). net_available() returns false, so main.c
+// hides "Play Online" there. Web uses net_web.c (native browser WebSocket);
+// Linux/macOS use net_posix.c. Exactly one backend provides these symbols per
+// platform, so the shared source list links everywhere.
 #include "net.h"
 
-#if defined(PLATFORM_WEB) || defined(PLATFORM_ANDROID) || \
-    defined(PLATFORM_IOS) || defined(_WIN32)
+#if defined(PLATFORM_ANDROID) || defined(PLATFORM_IOS) || defined(_WIN32)
 
 NetConn* net_connect(const char* host, int port, const char* path, bool tls) {
     (void)host; (void)port; (void)path; (void)tls;
