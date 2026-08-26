@@ -12,11 +12,11 @@ Current state:
 | Platform | Online today | Why |
 |---|---|---|
 | Linux | ✅ `wss` + `ws` | `net_posix.c`: from-scratch RFC 6455 over POSIX sockets, TLS via system OpenSSL |
-| macOS | ❌ (code path exists as plain `ws`) | `net_posix.c` compiles (POSIX sockets), but `wss` is blocked — homebrew OpenSSL is arm64-only, unlinkable into the universal binary |
+| macOS | ✅ `wss` + `ws` (NW2 done) | `net_apple.mm`: Network.framework (`NWProtocolWebSocket` + native TLS); OpenSSL retired from the mac build, fixing the arm64-only-OpenSSL universal-binary blocker |
 | Windows | ❌ none | `net_posix.c` is POSIX-only; Windows needs winsock2. Falls through to `net_stub` → menu hidden |
-| Web/WASM | ❌ none | `net_stub` |
+| Web/WASM | ✅ `wss` (NW1 done) | `net_web.c`: emscripten WebSocket (browser owns framing + TLS) |
 | Android | ❌ none | `net_stub` (though Bionic has POSIX sockets — see §6) |
-| iOS | ❌ none | `net_stub` |
+| iOS | ✅ `wss` + `ws` (NW2 done) | `net_apple.mm`: same Network.framework backend as macOS |
 
 Everything above the transport is already shared and tested: the protocol, the
 redacted-state client (`netgame.c`), the whole game. **Each platform only needs
@@ -120,13 +120,18 @@ problem.
   **Re-arm `nw_connection_receive_message` after every delivered message** (the
   #1 pitfall — forgetting stalls all inbound traffic); enqueue only text opcodes;
   `set_auto_reply_ping(true)` handles pings.
-- **Build:** compile the one `.mm` with `clang++ -fobjc-arc`, link
-  `-framework Network`. macOS: drop `net_posix` from `MAC_OBJ`, remove the
-  plain-ws caveat. iOS: add to `IOS_MM_SRC`, drop `net_stub`, add the framework.
-  Min deployment ≥ macOS 10.15 / iOS 13 (already satisfied).
-- **Testable:** macOS builds *and runs* `wss` in CI (Network.framework is on the
-  runner); iOS builds in CI, runs on Simulator/device. Not buildable on Linux, so
-  `net_posix` stays the Linux/loopback test path.
+- **Build (as shipped):** compile the one `.mm` with `clang++ -fno-objc-arc` —
+  the `nw_`/`dispatch_` handles are hand-retained in a plain C struct, so manual
+  retain/release is simpler than bridging casts under ARC — and link
+  `-framework Network`. macOS selects it with `-DOR_NET_APPLE`, which compiles
+  `net_posix` out of `MAC_OBJ`; the seam is declared `extern "C"` in `net.h` so
+  the Obj-C++ definitions link against the C callers. iOS drops `net_stub` and
+  adds the framework. Min deployment ≥ macOS 10.15 / iOS 13 (already satisfied).
+- **Testable (as wired):** macOS CI builds `net_apple.mm` *and* runs it against
+  the live Fly server via `make mac-net-test` (Network.framework is on the
+  runner); iOS builds + links in CI, on-device online play is manual
+  (Simulator/device). Not buildable on Linux, so `net_posix` stays the
+  Linux/loopback test path; `make net-live` runs the same live smoke test there.
 
 ## 6. Android — reuse net_posix + bundled OpenSSL (effort: M)
 
@@ -222,14 +227,19 @@ lands, nothing else changes.
 
 - **NW0 — Shared framing.** Extract `net_ws.c`/`net_ws.h`; `net_posix.c` becomes a
   transport binding. Pure refactor; existing tests are the guard.
-- **NW1 — Web.** `net_web.c`; `-lwebsocket.js`; Playwright live-`wss` smoke test.
-  Biggest reach, smallest effort.
-- **NW2 — Apple.** `net_apple.mm` (Network.framework); unblocks macOS `wss` *and*
-  delivers iOS; drop OpenSSL from the mac build.
+- **NW1 — Web. ✅ done.** `net_web.c`; `-lwebsocket.js`; Playwright live-`wss`
+  smoke test. Biggest reach, smallest effort.
+- **NW2 — Apple. ✅ done.** `net_apple.mm` (Network.framework); unblocks macOS
+  `wss` *and* delivers iOS; OpenSSL dropped from the mac build. `net.h` made
+  `extern "C"` for the Obj-C++ seam; macOS CI runs `make mac-net-test` live.
 - **NW3 — Android.** Prebuilt OpenSSL arm64-v8a + bundled `cacert.pem` + INTERNET
   permission + resume-reconnect; reuse `net_posix`.
 - **NW4 — Windows.** `net_win.c` (winsock2 + SChannel) on the NW0 framing;
   optional plain-`ws` first pass.
+
+NW0 (shared-framing refactor) is deferred until NW4 (Windows) is scheduled: it
+exists only to stop the Windows and Linux raw backends from drifting, and no
+raw backend but Linux has landed yet, so there is nothing to share prematurely.
 
 Recommended order is by value-per-effort: **Web → Apple → Android → Windows**.
 Web and Apple are the cheapest and cover the most users (any browser; all Apple
