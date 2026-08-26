@@ -1,10 +1,10 @@
 # openrackem — Google Play store listing
 
 Copy/paste these into the Play Console (**Grow → Store presence → Main store
-listing**, plus **Store settings** for category). The images in this folder are
-the shipped assets — they were generated once and are now committed artifacts.
-The generator was removed after the assets landed; recover it from history
-(`git log -- scripts/gen_play_assets.py`) if they ever need regenerating.
+listing**, plus **Store settings** for category). The images referenced below
+are release-1 work: regenerate icon, feature graphic, and screenshots from the
+finished game before submission (the PNGs currently in this folder are
+placeholders carried from the scaffold).
 
 ## Assets (this folder)
 
@@ -24,40 +24,39 @@ openrackem
 ## Short description (≤80 chars)
 
 ```
-Classic falling-block puzzle. Free, open source, no ads, no tracking.
+Classic rack-sorting card game. Free, open source, no ads, no tracking.
 ```
 
 ## Full description (≤4000 chars)
 
 ```
-Stack falling blocks, clear lines, and chase higher levels in a clean, classic block puzzle — with none of the junk that clutters this genre.
+Draw a card, slot it into your rack, and race to get all ten in ascending order before your opponents do — the classic rack-sorting card game, with none of the junk that clutters mobile card games.
 
 No ads. No tracking. No accounts. No in-app purchases. openrackem requests zero permissions and never touches the network. It's just the game.
 
-PURE CLASSIC GAMEPLAY
-• Clear lines to score and level up, with gravity that ramps up as you go
-• Plan ahead with the next-piece preview
-• Soft drop for control, hard drop for speed
-• Wall kicks for smooth, forgiving rotation
-• Pause anytime and pick up where you left off
+THE CLASSIC RACK GAME
+• Draw from the stock or take the face-up discard, exchange into your rack, and be first to read low-to-high
+• Full official rules and scoring: 75 points for going out, 5 per card in sequence for everyone else, first to 500 wins the match
+• The mandatory two-player run rule, plus the official Bonus (run bonuses) and Partners (two vs two) variants
+• Three AI strengths, from casual to card-counting
 
 BUILT RIGHT
-• Large on-screen buttons tuned for one-handed play
-• Crisp, minimal visuals that stay out of your way
+• Big, thumb-friendly cards tuned for one-handed play
+• Crisp, minimal table that stays out of your way
 • Fully offline — perfect for flights, commutes, anywhere
 • Tiny download, easy on your battery
 
 FREE AND OPEN SOURCE
 openrackem is open source. Read the code, report a bug, or build it yourself: https://github.com/dannyheskett/openrackem
 
-No dark patterns, no "energy" timers, no paywalled pieces. Just the timeless falling-block puzzle, done properly.
+No dark patterns, no "energy" timers, no paywalled decks. An original implementation of the timeless rack-sorting card game, done properly. Not affiliated with or endorsed by any other game or its rights holders.
 ```
 
 ## Categorization (Store settings)
 
 - **App or game:** Game
-- **Category:** Puzzle
-- **Tags:** puzzle, arcade, retro, blocks
+- **Category:** Card
+- **Tags:** card, casual, retro, classic
 - **Email:** dan@danheskett.com
 - **Website:** https://danheskett.com
 - **Content rating:** Everyone (no objectionable content; IARC questionnaire —
@@ -73,7 +72,14 @@ No dark patterns, no "energy" timers, no paywalled pieces. Just the timeless fal
 
 ## Screenshots
 
-Live on the listing (pushed via the Play API): `screenshots/phone/` (4x
-1080x1920) in the phone slot, `screenshots/tablet/` (4x 2160x3840) in both the
-7-inch and 10-inch tablet slots. Captured from the CI web build's portrait
-renderer (pixel-identical to Android) in a headless browser.
+Capture from the CI web build's portrait renderer (pixel-identical to
+Android) in a headless browser: menu, mid-round table, a placement, and the
+round-scoring reveal. 4× 1080×1920 for phone; 4× 2160×3840 for both tablet
+slots.
+
+## Trademark note
+
+The name of the commercial rack-sorting game is a trademark of its rights
+holder and appears nowhere in the app, the listing, or the assets. Keep it
+that way in any listing edits: describe the mechanics ("rack-sorting card
+game"), never the trademarked title.

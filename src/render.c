@@ -95,6 +95,25 @@ bool deal_discard_flipped(const Game* g) {
     return g->anim.deal_step >= g->rules.player_count * RACK_SLOTS + 1;
 }
 
+bool anim_in_flight(const Game* g) {
+    return g->anim.kind != ANIM_NONE && g->anim.frames > 0 && g->anim.total > 0;
+}
+
+float anim_progress(const Game* g) {
+    float t = 1.0f - (float)g->anim.frames / (float)g->anim.total;
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+    return t * t * (3.0f - 2.0f * t);   // smoothstep: ease out of and into rest
+}
+
+void draw_flying_card(Rectangle from, Rectangle to, float t, int value, bool face_up) {
+    int x = (int)(from.x + (to.x - from.x) * t);
+    int y = (int)(from.y + (to.y - from.y) * t);
+    int w = (int)(from.width  + (to.width  - from.width)  * t);
+    int h = (int)(from.height + (to.height - from.height) * t);
+    draw_card(x, y, w, h, value, face_up, false);
+}
+
 // A floating, centered panel with a title and an optional subtitle, drawn over a
 // dimmed background. Shared by the pause overlay and end-of-round banners.
 void draw_center_panel_at(int w, int h, int panel_w, int panel_h, int ts,

@@ -2,7 +2,7 @@
 
 _Last updated: July 4, 2026_
 
-openrackem ("the app") is a single-player falling-block puzzle game. This policy
+openrackem ("the app") is a card game. This policy
 explains, plainly, what the app does with your information: **nothing.**
 
 ## Data we collect

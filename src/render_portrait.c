@@ -218,6 +218,13 @@ static void draw_table_portrait(const Game* game, const TableUi* ui) {
                   human_turn ? ACCENT : SLOT_LABEL);
 
     // Bottom band: STOCK / DISCARD / HELD, thumb-sized, inside the margin.
+    // While a card is in flight its destination draws one step behind (the
+    // pile's previous top, an empty held spot), so landing = arrival.
+    bool flying = anim_in_flight(game);
+    bool draw_arrives_held = flying && (game->anim.kind == ANIM_DRAW_STOCK ||
+                                        game->anim.kind == ANIM_DRAW_DISCARD);
+    bool card_arrives_pile = flying && (game->anim.kind == ANIM_PLACE ||
+                                        game->anim.kind == ANIM_DISCARD);
     int px[3];
     px[0] = L.m;
     px[1] = L.m * 2 + L.pile_w;
@@ -237,7 +244,14 @@ static void draw_table_portrait(const Game* game, const TableUi* ui) {
                                          (float)(L.pile_w + L.m), (float)(L.pile_h + L.pile_label_fs + L.m)});
 
     gfx_text("DISCARD", px[1], label_y, L.pile_label_fs, SLOT_LABEL);
-    if (game->discard_count > 0 && deal_discard_flipped(game)) {
+    if (card_arrives_pile) {
+        if (game->discard_count >= 2) {
+            draw_card(px[1], L.pile_y, L.pile_w, L.pile_h,
+                      game->discard[game->discard_count - 2], true, false);
+        } else {
+            draw_card_outline(px[1], L.pile_y, L.pile_w, L.pile_h);
+        }
+    } else if (game->discard_count > 0 && deal_discard_flipped(game)) {
         draw_card(px[1], L.pile_y, L.pile_w, L.pile_h,
                   game->discard[game->discard_count - 1], true, false);
     } else {
@@ -247,11 +261,48 @@ static void draw_table_portrait(const Game* game, const TableUi* ui) {
                                            (float)(L.pile_w + L.m), (float)(L.pile_h + L.pile_label_fs + L.m)});
 
     gfx_text("HELD", px[2], label_y, L.pile_label_fs, SLOT_LABEL);
-    if (game->held_card) {
+    if (game->held_card && !draw_arrives_held) {
         bool face_up = (game->turn == focus) || game->held_from_discard;
         draw_card(px[2], L.pile_y, L.pile_w, L.pile_h, game->held_card, face_up, false);
     } else {
         draw_card_outline(px[2], L.pile_y, L.pile_w, L.pile_h);
+    }
+
+    // The one visibly moving card, over the finished table. An opponent's
+    // exchange flies from their block, not a slot — which slot they filled is
+    // information the table doesn't show.
+    if (flying) {
+        float t = anim_progress(game);
+        Rectangle stock_r   = {(float)px[0], (float)L.pile_y, (float)L.pile_w, (float)L.pile_h};
+        Rectangle discard_r = {(float)px[1], (float)L.pile_y, (float)L.pile_w, (float)L.pile_h};
+        Rectangle held_r    = {(float)px[2], (float)L.pile_y, (float)L.pile_w, (float)L.pile_h};
+        Rectangle from;
+        switch (game->anim.kind) {
+        case ANIM_DRAW_STOCK:
+            draw_flying_card(stock_r, held_r, t, 0, false);
+            break;
+        case ANIM_DRAW_DISCARD:
+            draw_flying_card(discard_r, held_r, t, game->anim.card, true);
+            break;
+        case ANIM_PLACE:
+            if (game->anim.seat == focus) {
+                int y = L.rack_y + (RACK_SLOTS - 1 - game->anim.slot) * L.row;
+                from = (Rectangle){(float)L.rack_x, (float)y, (float)L.card_w, (float)L.card_h};
+            } else {
+                int bi = 0;
+                for (int s = 0; s < game->anim.seat; s++) {
+                    if (s != focus) bi++;
+                }
+                int bw = (w - L.m * (game->rules.player_count)) / (game->rules.player_count - 1);
+                from = (Rectangle){(float)(L.m + bi * (bw + L.m) + bw / 2 - 12),
+                                   (float)(L.opp_y + 4), 24.0f, (float)(L.opp_h - 8)};
+            }
+            draw_flying_card(from, discard_r, t, game->anim.card, true);
+            break;
+        case ANIM_DISCARD:
+            draw_flying_card(held_r, discard_r, t, game->anim.card, true);
+            break;
+        }
     }
 }
 

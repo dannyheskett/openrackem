@@ -45,6 +45,14 @@ const char* seat_name(const Game* g, int seat);
 int  deal_cards_for_seat(const Game* g, int seat);
 bool deal_discard_flipped(const Game* g);
 
+// Card-flight tween: true while a card is visibly travelling; progress runs
+// 0 -> 1 with smoothstep easing. Each renderer maps the anim's kind/seat/slot
+// to its own source and destination rectangles and draws the flyer on top.
+bool  anim_in_flight(const Game* g);
+float anim_progress(const Game* g);
+// Interpolate a card between two rects at progress t and draw it.
+void draw_flying_card(Rectangle from, Rectangle to, float t, int value, bool face_up);
+
 // Table hit zones for touch (captured per frame; read by render_table_hit_test).
 void table_hits_reset(void);
 void table_hit_set(int id, Rectangle r);   // id: 0..9 slots, HIT_STOCK, HIT_DISCARD

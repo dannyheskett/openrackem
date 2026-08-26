@@ -43,6 +43,8 @@ static void shoot_all(const char* mode) {
     TableUi ui = { .cursor = 4, .standings = false };
 
     // Mid-round table: a few turns in, human holding a stock card, cursor up.
+    // Every apply arms a card-flight tween; drain it (the harness never runs
+    // the 60 Hz loop) so still shots don't capture a flyer frozen at t=0.
     Game* g = make_game(false);
     game_apply(g, (Action){ACTION_DRAW_DISCARD, 0});
     game_apply(g, (Action){ACTION_PLACE, 6});
@@ -50,6 +52,7 @@ static void shoot_all(const char* mode) {
     game_apply(g, (Action){ACTION_DISCARD, 0});
     game_apply(g, (Action){ACTION_DRAW_STOCK, 0});
     game_apply(g, (Action){ACTION_PLACE, 2});
+    while (g->anim.frames > 0) game_update(g);
     shoot(mode, "table-draw", g, &ui);
 
     g->turn = 0;
@@ -57,6 +60,13 @@ static void shoot_all(const char* mode) {
     g->held_card = 33;
     g->held_from_discard = false;
     shoot(mode, "table-place", g, &ui);
+
+    // Mid-flight tween: an exchange just happened; freeze the displaced card
+    // halfway between the slot and the discard pile.
+    game_apply(g, (Action){ACTION_PLACE, 4});
+    for (int i = 0; i < 5; i++) game_update(g);   // half of SLIDE_FRAMES
+    shoot(mode, "table-flight", g, &ui);
+    while (g->anim.frames > 0) game_update(g);   // let the tween land
 
     // Round over: fabricated results (state is public POD, no engine needed).
     uint8_t winner_rack[RACK_SLOTS] = {2, 10, 11, 24, 32, 39, 41, 47, 51, 59};

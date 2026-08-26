@@ -82,6 +82,56 @@ static int focus_seat(const Game* g) {
     return (g->rules.human_seat >= 0) ? g->rules.human_seat : 0;
 }
 
+// --- Card-flight geometry ---------------------------------------------------
+static Rectangle stock_rect(void)   { return (Rectangle){RIGHT_X, RACK_Y + 14,  CARD_W, CARD_H}; }
+static Rectangle discard_rect(void) { return (Rectangle){RIGHT_X, RACK_Y + 76,  CARD_W, CARD_H}; }
+static Rectangle held_rect(void)    { return (Rectangle){RIGHT_X, RACK_Y + 138, CARD_W, CARD_H}; }
+
+static Rectangle slot_rect(int s) {
+    return (Rectangle){RACK_X, (float)(RACK_Y + (RACK_SLOTS - 1 - s) * ROW_STEP),
+                       CARD_W, CARD_H};
+}
+
+// A small card footprint at an opponent's left-column block, used as the
+// flight endpoint for their exchanges. Deliberately the block, not a slot:
+// which slot an opponent filled is information the table doesn't show.
+static Rectangle opp_card_rect(const Game* g, int seat) {
+    int focus = focus_seat(g);
+    int bi = 0;
+    for (int s = 0; s < seat; s++) {
+        if (s != focus) bi++;
+    }
+    int oy = RACK_Y + 4 + bi * 64;
+    return (Rectangle){LEFT_X + 62, (float)(oy + 14), 26, 20};
+}
+
+// The one visibly moving card, drawn over the finished table. Draws travel to
+// the held spot; an exchange sends the displaced card to the discard pile
+// (from the exact slot for the focus seat, from the block for opponents).
+static void draw_flight(const Game* game) {
+    if (!anim_in_flight(game)) return;
+    float t = anim_progress(game);
+    int focus = focus_seat(game);
+    switch (game->anim.kind) {
+    case ANIM_DRAW_STOCK:
+        draw_flying_card(stock_rect(), held_rect(), t, 0, false);
+        break;
+    case ANIM_DRAW_DISCARD:
+        draw_flying_card(discard_rect(), held_rect(), t, game->anim.card, true);
+        break;
+    case ANIM_PLACE: {
+        Rectangle from = (game->anim.seat == focus)
+                       ? slot_rect(game->anim.slot)
+                       : opp_card_rect(game, game->anim.seat);
+        draw_flying_card(from, discard_rect(), t, game->anim.card, true);
+        break;
+    }
+    case ANIM_DISCARD:
+        draw_flying_card(held_rect(), discard_rect(), t, game->anim.card, true);
+        break;
+    }
+}
+
 static void text_centered(const char* s, int cx, int y, int fs, Color c) {
     gfx_text(s, cx - gfx_measure_text(s, fs) / 2, y, fs, c);
 }
@@ -155,7 +205,15 @@ static void draw_table_landscape(const Game* game, const TableUi* ui) {
         oy += 64;
     }
 
-    // Right: stock, discard, the held card, then match state.
+    // Right: stock, discard, the held card, then match state. While a card is
+    // in flight its destination draws one step behind (the pile's previous
+    // top, an empty held spot), so the landing coincides with the arrival.
+    bool draw_flying = anim_in_flight(game);
+    bool draw_arrives_held = draw_flying && (game->anim.kind == ANIM_DRAW_STOCK ||
+                                             game->anim.kind == ANIM_DRAW_DISCARD);
+    bool card_arrives_pile = draw_flying && (game->anim.kind == ANIM_PLACE ||
+                                             game->anim.kind == ANIM_DISCARD);
+
     draw_pile_label("STOCK", RIGHT_X, RACK_Y);
     if (game->stock_count > 0) {
         draw_card(RIGHT_X, RACK_Y + 14, CARD_W, CARD_H, 0, false, false);
@@ -166,7 +224,14 @@ static void draw_table_landscape(const Game* game, const TableUi* ui) {
     }
 
     draw_pile_label("DISCARD", RIGHT_X, RACK_Y + 62);
-    if (game->discard_count > 0 && deal_discard_flipped(game)) {
+    if (card_arrives_pile) {
+        if (game->discard_count >= 2) {
+            draw_card(RIGHT_X, RACK_Y + 76, CARD_W, CARD_H,
+                      game->discard[game->discard_count - 2], true, false);
+        } else {
+            draw_card_outline(RIGHT_X, RACK_Y + 76, CARD_W, CARD_H);
+        }
+    } else if (game->discard_count > 0 && deal_discard_flipped(game)) {
         draw_card(RIGHT_X, RACK_Y + 76, CARD_W, CARD_H,
                   game->discard[game->discard_count - 1], true, false);
     } else {
@@ -174,7 +239,7 @@ static void draw_table_landscape(const Game* game, const TableUi* ui) {
     }
 
     draw_pile_label("HELD", RIGHT_X, RACK_Y + 124);
-    if (game->held_card) {
+    if (game->held_card && !draw_arrives_held) {
         bool face_up = (game->turn == focus) || game->held_from_discard;
         draw_card(RIGHT_X, RACK_Y + 138, CARD_W, CARD_H, game->held_card, face_up, false);
     } else {
@@ -223,6 +288,8 @@ static void draw_table_landscape(const Game* game, const TableUi* ui) {
              : "UP/DOWN: SLOT    ENTER: EXCHANGE    X: THROW AWAY";
     }
     if (hint) text_centered(hint, BASE_WIDTH / 2, BASE_HEIGHT - 14, 10, SLOT_LABEL);
+
+    draw_flight(game);
 }
 
 // --- Round scoring / standings / match over ---------------------------------

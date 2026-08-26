@@ -1,26 +1,99 @@
 # openrackem
 
-A rack-sorting card game written in C with raylib: draw, exchange, and race to
-get your rack of ten cards into ascending order before your opponents. Full
-official rules and scoring, AI opponents in three strengths, and the Bonus and
-Partners variants.
+A rack-sorting card game written in C with raylib. Draw from the stock or the
+discard pile and exchange into your rack of ten: first player to read strictly
+ascending from slot #5 to slot #50 calls **RACK 'EM!** and banks 75 points.
+First to 500 wins the match.
 
-Targets: Linux, Windows, macOS, Web (WASM), Android, and iOS (native Metal).
+An original implementation of the classic rack-sorting card game — full
+official rules and scoring, including the mandatory two-player run rule and
+the optional Bonus and Partners variants — with AI opponents in three
+strengths. Not affiliated with or endorsed by any other game or its rights
+holders.
 
-*This README is a scaffold placeholder; the full build/play documentation lands
-with the polish milestone (M6 in `docs/PLAN.md`).*
+Targets: **Linux**, **Windows** (x64/x86), **macOS** (universal), **Web**
+(WASM), **Android**, and **iOS** (native Metal, no raylib).
+
+## Playing
+
+- **Draw** from the face-down stock (`S`/`Left`, or tap it) or take the
+  face-up discard (`D`/`Right`, or tap it).
+- **Exchange** the drawn card into any slot (`Up`/`Down` + `Enter`, or tap the
+  slot); the displaced card goes face up onto the discard pile. A card taken
+  from the discard pile *must* be exchanged.
+- A stock draw you don't want can be thrown away (`X`, or tap the discard
+  pile again).
+- Go out by getting all ten slots strictly ascending. At 2 players you also
+  need a run of three consecutive numbers (official rule).
+- Losers score 5 per card in ascending sequence from slot #5, stopping at the
+  first break. Winner scores 75. Options add the official Bonus (run bonuses:
+  125/175/275/475 totals) and Partners (4 players, pairs) variants.
+
+`Escape` returns to the menu (game stays resumable), `Enter` pauses,
+`Alt+Enter` toggles fullscreen. On touch screens everything is a tap; a
+two-finger tap returns to the menu.
 
 ## Building
 
+### Linux / WSL2
+
 ```bash
 ./scripts/build_raylib_linux.sh   # once: build the pinned raylib
-make                              # dev build -> build/openrackem
+make          # dev build -> build/openrackem
 make run
-make test                         # headless unit tests (no window needed)
+make release  # optimized -> build/openrackem-release
 ```
+
+### Tests (headless, no window needed)
+
+```bash
+make test     # rules engine, AI legality/termination, touch recognizer
+make ai-bench # tier-vs-tier AI win rates (thousands of seeded matches)
+make shots    # deterministic screenshots of every screen (needs a display)
+```
+
+### Windows (cross-compile from Linux)
+
+```bash
+./scripts/build_raylib_windows.sh   # needs mingw-w64
+make windows                        # build/openrackem-x64.exe + -x86.exe
+```
+
+### Web (WASM)
+
+```bash
+./scripts/build_raylib_web.sh       # needs emsdk on PATH
+make web
+make web-serve                      # http://localhost:8080/openrackem.html
+```
+
+A desktop browser gets the landscape keyboard layout; a phone gets the
+portrait touch layout — same binary, chosen by pointer type.
+
+### macOS / Android / iOS
+
+`make mac` (Xcode toolchain), `make android` (SDK + NDK, no Gradle; `make
+android-play` builds the Play `.aab`), `make ios` / `make ios-sim` (hand
+assembled `.ipa`, no Xcode project). CI builds all of these on every PR; see
+`.github/workflows/ci.yml` for the exact toolchain setup each platform needs.
+
+## Architecture notes
+
+- `game.c` / `rules.c` / `ai.c` are pure logic: no rendering, no raylib, no
+  `rand()`, no clock. All randomness flows from one seeded xorshift64* state,
+  so a match replays byte-for-byte from `(seed, rules, action list)`.
+- Game state is a flat POD with no pointers; a snapshot is a `memcpy`
+  (`GAME_SERIAL_SIZE`), which tests enforce.
+- The AI consumes a redacted `GameView` — it structurally cannot see another
+  rack, the stock order, or the RNG seed.
+- Two renderers behind one dispatch: fixed 640x480 landscape (desktop) and an
+  adaptive portrait layout (touch), both drawing through the `gfx.h`
+  primitive layer so the iOS Metal backend swaps in cleanly.
+- Sound effects are synthesized at startup (square waves, sweeps, noise) —
+  no audio files. Off by default.
+- The desktop builds include a frame-fidelity `.mp4` recorder (`--record
+  [path]`, or the Record menu toggle).
 
 ## License
 
-MIT (see `LICENSE`). Third-party components are listed in `NOTICE`.
-openrackem is an original implementation of a rack-sorting card game, not
-affiliated with or endorsed by any other game or its rights holders.
+MIT (see `LICENSE`). Bundled third-party components are listed in `NOTICE`.

@@ -1,10 +1,10 @@
 #ifndef OPENRACKEM_TICK_H
 #define OPENRACKEM_TICK_H
 
-// Fixed-timestep accumulator. The simulation (game.c) advances in whole 1/60 s
-// steps — gravity, DAS, and the clear animation are all counted in frames — so
-// this converts a variable real-frame delta into the right number of steps to
-// run this frame. The game then plays at the same speed regardless of the
+// Fixed-timestep accumulator. The presentation layer advances in whole 1/60 s
+// steps — card tweens, the AI think delay, and the deal reveal are all counted
+// in frames — so this converts a variable real-frame delta into the right
+// number of steps to run this frame. The game then plays at the same speed regardless of the
 // display's refresh (60, 120, 144 Hz, or an irregular browser rAF): a 60 Hz
 // frame runs one step, a 120 Hz frame runs one step every other frame, a slow
 // 30 Hz frame runs two. The backlog is clamped so a long stall (a breakpoint, a
