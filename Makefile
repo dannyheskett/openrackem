@@ -18,7 +18,8 @@ SRC := src/main.c src/rules.c src/game.c src/ai.c src/tick.c src/input.c \
        src/render.c src/render_portrait.c src/render_landscape.c src/gfx_raylib.c \
        src/safe_area.c \
        src/sound.c src/audio_raylib.c \
-       src/netgame.c src/net_posix.c src/net_stub.c src/net_web.c \
+       src/netgame.c src/net_ws.c src/net_posix.c src/net_stub.c src/net_web.c \
+       src/net_win.c \
        src/recorder.c src/encode_h264.c src/encode_mux.c
 
 # Shared standard/warning flags and vendored-header include paths.
@@ -88,8 +89,11 @@ run-release: $(OUT_RELEASE)
 # Windows cross-compile (x64 + x86, static, fully self-contained)
 # mingw-w64 predefines _WIN32, so no -D is needed.
 # ---------------------------------------------------------------------------
+# net_win.c's online client links winsock2 (-lws2_32), SChannel/SSPI (-lsecur32),
+# and the cert-chain policy API (-lcrypt32) — all system import libs, so they go
+# in the -Bdynamic group.
 WIN_CFLAGS  := $(CFLAGS_COMMON) -O2
-WIN_LDFLAGS := -Wl,-Bstatic -lraylib -lopengl32 -lgdi32 -lwinmm -lpthread -Wl,-Bdynamic -mwindows -static -static-libgcc
+WIN_LDFLAGS := -Wl,-Bstatic -lraylib -lopengl32 -lgdi32 -lwinmm -lpthread -Wl,-Bdynamic -lws2_32 -lsecur32 -lcrypt32 -mwindows -static -static-libgcc
 
 WIN64_CC := x86_64-w64-mingw32-gcc
 WIN32_CC := i686-w64-mingw32-gcc
@@ -637,10 +641,10 @@ NET_E2E_BIN := build/net_e2e
 net-e2e: $(NET_E2E_BIN) $(SERVER_BIN)
 	./$(NET_E2E_BIN)
 
-$(NET_E2E_BIN): tests/net_e2e.c src/netgame.c src/net_posix.c \
+$(NET_E2E_BIN): tests/net_e2e.c src/netgame.c src/net_ws.c src/net_posix.c \
                 src/rules.c src/game.c src/ai.c $(wildcard src/*.h) | $(OBJ_DIR)
 	gcc -std=c99 -Wall -Wextra -O0 -g -Isrc tests/net_e2e.c src/netgame.c \
-	    src/net_posix.c src/rules.c src/game.c src/ai.c -o $(NET_E2E_BIN)
+	    src/net_ws.c src/net_posix.c src/rules.c src/game.c src/ai.c -o $(NET_E2E_BIN)
 
 # Live-server smoke test: two headless clients connect to the REAL deployed
 # daemon and create+join a game, proving the wss/TLS transport end to end.
@@ -651,10 +655,10 @@ NET_LIVE_BIN := build/net_live
 net-live: $(NET_LIVE_BIN)
 	./$(NET_LIVE_BIN)
 
-$(NET_LIVE_BIN): tests/net_live.c src/netgame.c src/net_posix.c \
+$(NET_LIVE_BIN): tests/net_live.c src/netgame.c src/net_ws.c src/net_posix.c \
                  src/rules.c src/game.c src/ai.c $(wildcard src/*.h) | $(OBJ_DIR)
 	gcc -std=c99 -Wall -Wextra -O0 -g -Isrc $(TLS_CFLAGS) tests/net_live.c \
-	    src/netgame.c src/net_posix.c src/rules.c src/game.c src/ai.c \
+	    src/netgame.c src/net_ws.c src/net_posix.c src/rules.c src/game.c src/ai.c \
 	    -o $(NET_LIVE_BIN) $(TLS_LIBS)
 
 # macOS: the same live smoke test, linking the Network.framework backend
@@ -671,6 +675,22 @@ mac-net-test: | $(MAC_OBJ_DIR)
 	    $(MAC_OBJ_DIR)/rules_t.o $(MAC_OBJ_DIR)/game_t.o $(MAC_OBJ_DIR)/ai_t.o \
 	    $(MAC_OBJ_DIR)/net_apple_t.o -framework Network -o build/mac-net-test
 	./build/mac-net-test
+
+# Windows: the same live smoke test, linking the winsock2 + SChannel backend
+# (net_win.c) — how CI functionally verifies the Windows online client on a real
+# windows-latest runner (GitHub-hosted, no external box). WINTEST_CC is the
+# runner's MinGW gcc; override with the cross compiler (x86_64-w64-mingw32-gcc)
+# to compile-check the backend on a Linux host without running the .exe.
+WINTEST_CC ?= gcc
+
+win-net-build:
+	mkdir -p build
+	$(WINTEST_CC) -std=c99 -Wall -Wextra -O2 -Isrc tests/net_live.c \
+	    src/netgame.c src/net_ws.c src/net_win.c src/rules.c src/game.c src/ai.c \
+	    -o build/net_live.exe -lws2_32 -lsecur32 -lcrypt32
+
+win-net-test: win-net-build
+	./build/net_live.exe
 
 # ---------------------------------------------------------------------------
 # Distribution archives. Each dist-<platform> stages the platform binary plus
@@ -735,6 +755,6 @@ clean:
 # Pull in auto-generated header dependencies (ignored if not yet present).
 -include $(OBJ:.o=.d) $(REL_OBJ:.o=.d) $(WIN64_OBJ:.o=.d) $(WIN32_OBJ:.o=.d) $(MAC_OBJ:.o=.d)
 
-.PHONY: all run release run-release windows mac web web-serve test ai-bench shots server server-run net-e2e net-live mac-net-test clean \
+.PHONY: all run release run-release windows mac web web-serve test ai-bench shots server server-run net-e2e net-live mac-net-test win-net-build win-net-test clean \
         android android-play ios ios-sim \
         dist dist-linux dist-windows dist-mac dist-web dist-android dist-android-play dist-ios

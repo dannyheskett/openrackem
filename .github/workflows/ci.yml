@@ -65,6 +65,24 @@ jobs:
       - name: Cross-compile Win64 + Win32
         run: make windows
 
+  # Functional verification of the Windows online backend (net_win.c: winsock2 +
+  # SChannel) on a real, GitHub-hosted Windows machine — no external box. Builds
+  # the live smoke test with MinGW and runs it against the deployed Fly server,
+  # exercising the SChannel TLS handshake, cert/hostname validation, and the wss
+  # round-trip. Mirrors how the mac job verifies net_apple.mm.
+  win-net:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: mingw-w64-x86_64-gcc make
+      - name: Build + run online smoke test (net_win.c -> live wss)
+        shell: msys2 {0}
+        run: make win-net-test
+
   mac:
     runs-on: macos-14
     timeout-minutes: 10
