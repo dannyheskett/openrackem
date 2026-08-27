@@ -24,7 +24,11 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#if !defined(PLATFORM_WEB) && !defined(PLATFORM_ANDROID) && \
+// Android (Bionic) has the full POSIX socket surface this backend uses, so it
+// reuses net_posix unchanged for the transport; only the TLS trust anchor
+// differs (no OpenSSL-visible system CA store — see the PLATFORM_ANDROID branch
+// in net_connect). Web/iOS/Windows/macOS select a different net_*.c.
+#if !defined(PLATFORM_WEB) && \
     !defined(PLATFORM_IOS) && !defined(_WIN32) && !defined(OR_NET_APPLE)
 
 #include <arpa/inet.h>
@@ -42,6 +46,15 @@
 #ifdef OR_TLS
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#ifdef PLATFORM_ANDROID
+// Android ships no CA bundle OpenSSL can find (set_default_verify_paths finds
+// nothing, and /system/etc/security/cacerts is incomplete on Android 14+ where
+// the roots moved into a Conscrypt APEX). The Mozilla bundle is compiled in as a
+// byte array (scripts/gen_cacert.py) and loaded from memory into the store.
+#include <openssl/x509.h>
+#include <openssl/pem.h>
+#include "cacert_pem.h"
+#endif
 #endif
 
 #define NET_IN_CAP   16384
@@ -174,7 +187,20 @@ NetConn* net_connect(const char* host, int port, const char* path, bool tls) {
     if (tls) {
         c->ctx = SSL_CTX_new(TLS_client_method());
         if (!c->ctx) { c->status = NET_ERROR; return c; }
+#ifdef PLATFORM_ANDROID
+        {   // Load the embedded Mozilla roots into the verify store.
+            X509_STORE* store = SSL_CTX_get_cert_store(c->ctx);
+            BIO* bio = BIO_new_mem_buf(cacert_pem, (int)cacert_pem_len);
+            X509* x;
+            while (bio && (x = PEM_read_bio_X509(bio, NULL, NULL, NULL)) != NULL) {
+                X509_STORE_add_cert(store, x);
+                X509_free(x);
+            }
+            if (bio) BIO_free(bio);
+        }
+#else
         SSL_CTX_set_default_verify_paths(c->ctx);           // system CA store
+#endif
         SSL_CTX_set_verify(c->ctx, SSL_VERIFY_PEER, NULL);
         SSL_CTX_set_min_proto_version(c->ctx, TLS1_2_VERSION);
         c->ssl = SSL_new(c->ctx);

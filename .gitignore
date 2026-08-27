@@ -41,3 +41,6 @@ Thumbs.db
 .playwright-mcp/
 __pycache__/
 *.pyc
+third_party/openssl-android/
+third_party/cacert/
+build/openssl-src/

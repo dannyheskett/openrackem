@@ -127,7 +127,7 @@ jobs:
 
   android:
     runs-on: ubuntu-22.04
-    timeout-minutes: 10
+    timeout-minutes: 20
     env:
       NDK_VERSION: "26.3.11579264"
       ANDROID_BUILD_TOOLS: "35.0.0"
@@ -148,6 +148,8 @@ jobs:
           echo "ANDROID_NDK=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
       - name: Build raylib (Android, arm64-v8a static)
         run: ./scripts/build_raylib_android.sh
+      - name: Build OpenSSL (Android arm64-v8a, static — wss for the APK)
+        run: ./scripts/build_openssl_android.sh arm64-v8a
       - name: Build APK (sideload)
         run: |
           make android \
@@ -166,6 +168,54 @@ jobs:
         with:
           name: android-apk
           path: build/*.apk
+
+  # Functional verification of the Android online backend (net_posix.c + static
+  # OpenSSL + the embedded CA bundle) on a real Android userspace — an x86_64
+  # emulator, no physical device. Builds the live smoke test as an Android-native
+  # x86_64 executable, boots an AVD, adb-pushes it, and runs it against the Fly
+  # server: exercises the OpenSSL wss handshake, embedded-root cert validation,
+  # and the round-trip. Mirrors the win-net / mac jobs.
+  android-net:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      NDK_VERSION: "26.3.11579264"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+      - name: Install NDK
+        run: |
+          sdkmanager --install "ndk;${NDK_VERSION}"
+          echo "ANDROID_NDK=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+      - name: Build OpenSSL (Android x86_64, static)
+        run: ./scripts/build_openssl_android.sh x86_64
+      - name: Build the Android x86_64 smoke test
+        run: make android-net-build
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Boot emulator + run online smoke test (net_posix -> live wss)
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          arch: x86_64
+          target: google_apis
+          force-avd-creation: false
+          emulator-options: -no-window -no-snapshot -noaudio -no-boot-anim -gpu swiftshader_indirect
+          disable-animations: true
+          script: |
+            adb push build/net_live_android /data/local/tmp/net_live
+            adb shell chmod 755 /data/local/tmp/net_live
+            adb shell /data/local/tmp/net_live | tee out.txt
+            grep -q "OK: live wss round-trip verified" out.txt
 
   ios:
     runs-on: macos-26

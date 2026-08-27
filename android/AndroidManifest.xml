@@ -14,6 +14,10 @@
          so hardcoding them here would silently pin every Play upload to 1. -->
     <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="35" />
 
+    <!-- The online client (net_posix.c over OpenSSL) opens a wss socket to the
+         matchmaking server; without INTERNET, connect() fails with EPERM. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <uses-feature android:glEsVersion="0x00020000" android:required="true" />
 
     <application android:label="openrackem"
