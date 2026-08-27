@@ -34,6 +34,7 @@ typedef struct {
     uint8_t  strikes;     // consecutive turn timeouts
     bool     ai_control;  // struck out or left: AI plays until they act again
     bool     confirmed;   // round-over confirmation
+    char     name[16];    // chosen display name ("" = use the directional default)
 } Seat;
 
 typedef struct {
@@ -64,6 +65,7 @@ typedef struct {
     int     tokens;          // rate bucket
     int64_t bucket_ms;
     int64_t queued_ms;       // when they entered the quick queue
+    char    name[16];        // chosen player name, applied to the seat on seating
 } Client;
 
 typedef struct {
@@ -250,6 +252,11 @@ static void emit_state(Srv* s, Room* rm, int seat, int last_seat, int last_a,
         bool ai = !rm->seats[p].used || rm->seats[p].ai_control || !rm->seats[p].connected;
         jw_f(&w, "%s%d", p ? "," : "", ai ? 1 : 0);
     }
+    jw_f(&w, "],\"handles\":[");
+    for (int p = 0; p < n; p++) {
+        const char* h = rm->seats[p].name[0] ? rm->seats[p].name : HANDLES[p];
+        jw_f(&w, "%s\"%s\"", p ? "," : "", h);
+    }
     jw_f(&w, "],\"winner\":%d,\"match_winner\":%d,\"recycles\":%d,\"events\":%u,",
         red.round_winner, red.match_winner, red.recycles, red.events);
 
@@ -292,7 +299,8 @@ static void send_welcome(Srv* s, Room* rm, int room_idx, int seat) {
         SRV_PROTO_VERSION, seat, rm->seats[seat].token, rm->code,
         rm->rules.player_count, rm->waiting ? 1 : 0);
     for (int i = 0; i < rm->rules.player_count; i++) {
-        jw_f(&w, "%s\"%s\"", i ? "," : "", HANDLES[i]);
+        const char* h = rm->seats[i].name[0] ? rm->seats[i].name : HANDLES[i];
+        jw_f(&w, "%s\"%s\"", i ? "," : "", h);
     }
     jw_f(&w, "]}");
     (void)room_idx;
@@ -478,6 +486,11 @@ static void seat_client(Srv* s, int room_idx, int seat, int client) {
     st->confirmed = false;
     make_token(s, st->token);
     Client* c = &s->clients[client];
+    // Copy the chosen name to the seat handle. A bounded byte loop (not snprintf)
+    // because both buffers hang off *s, which trips a false -Wrestrict overlap.
+    size_t ni = 0;
+    for (; ni + 1 < sizeof st->name && c->name[ni]; ni++) st->name[ni] = c->name[ni];
+    st->name[ni] = '\0';
     c->state = CL_SEATED;
     c->room = room_idx;
     c->seat = seat;
@@ -650,6 +663,14 @@ void srv_client_msg(Srv* s, int client, const char* text, size_t len, int64_t no
     if (strcmp(t, "ping") == 0) {
         send_text(s, client, "{\"t\":\"pong\"}", 12);
         return;
+    }
+
+    // A chosen name accompanies create/join/quick; the wire parser already
+    // restricts it to identifier-safe chars, so just length-cap it onto the
+    // client (applied to the seat when seated, incl. deferred quick-match).
+    {
+        const char* nm = wire_str(kv, n, "name");
+        if (nm) snprintf(c->name, sizeof c->name, "%.15s", nm);
     }
 
     if (strcmp(t, "create") == 0 && c->state == CL_LOBBY) {

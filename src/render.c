@@ -106,6 +106,22 @@ void draw_mini_rack(int x, int y, int cw, int ch, const Rack* rack, bool face_up
     }
 }
 
+// Optional per-seat display labels (online handles). Set while an online game is
+// on screen so opponents show their chosen names (or the server's directional
+// default) instead of "CPU N"; the local seat still shows "YOU". Cleared for
+// offline play.
+static char s_seat_labels[MAX_PLAYERS][16];
+static bool s_seat_labels_on = false;
+
+void render_set_seat_labels(const char labels[][16], int count) {
+    if (count > MAX_PLAYERS) count = MAX_PLAYERS;
+    for (int i = 0; i < count; i++)
+        snprintf(s_seat_labels[i], sizeof s_seat_labels[i], "%s", labels[i]);
+    for (int i = count < 0 ? 0 : count; i < MAX_PLAYERS; i++) s_seat_labels[i][0] = '\0';
+    s_seat_labels_on = true;
+}
+void render_clear_seat_labels(void) { s_seat_labels_on = false; }
+
 const char* seat_name(const Game* g, int seat) {
     static char buf[MAX_PLAYERS][8];
     // Defensive clamp: buf is indexed by seat, so an out-of-range value (from
@@ -113,6 +129,7 @@ const char* seat_name(const Game* g, int seat) {
     // rejects such states, but this is the last line before the memory write.
     if (seat < 0 || seat >= MAX_PLAYERS) return "?";
     if (seat == g->rules.human_seat) return "YOU";
+    if (s_seat_labels_on && s_seat_labels[seat][0]) return s_seat_labels[seat];
     // Number the CPUs 1..k in seat order, skipping the human seat.
     int n = 0;
     for (int s = 0; s <= seat; s++) {

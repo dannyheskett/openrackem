@@ -28,6 +28,12 @@ void render_cleanup(void);
 void render_frame(const Game* game, const TableUi* ui);
 // Gameplay scene with a "paused" overlay on top.
 void render_pause(const Game* game, const TableUi* ui);
+
+// Per-seat display names (online handles). Set before rendering an online game
+// so opponents show their chosen names; clear for offline play (seat_name then
+// falls back to "YOU" / "CPU N").
+void render_set_seat_labels(const char labels[][16], int count);
+void render_clear_seat_labels(void);
 // Floating menu: title plus a list of items, one highlighted. gap_before, if
 // >= 0, inserts a blank line before that item index.
 void render_menu(const char* title, const char* const* items, int count,

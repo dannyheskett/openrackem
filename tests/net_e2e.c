@@ -62,14 +62,14 @@ int main(void) {
     Rules r = rules_default();
     r.player_count = 2;
     r.target_score = 50;    // shortest match: one player going out decides it
-    netgame_start(&a, "127.0.0.1", port, false, NG_JOIN_CREATE, NULL, &r);
+    netgame_start(&a, "127.0.0.1", port, false, NG_JOIN_CREATE, NULL, &r, "Alice");
 
     // Pump A until it has a room code.
     for (int i = 0; i < 2000 && a.code[0] == '\0'; i++) pump(&a);
     CHECK(a.code[0] != '\0');
     printf("  room code: %s\n", a.code);
 
-    netgame_start(&b, "127.0.0.1", port, false, NG_JOIN_CODE, a.code, NULL);
+    netgame_start(&b, "127.0.0.1", port, false, NG_JOIN_CODE, a.code, NULL, "Bob");
 
     // Play. On its own turn each client runs the real AI over its redacted
     // view (its own rack and the public table are all ai_choose needs), so
@@ -78,10 +78,19 @@ int main(void) {
     // on its own turn, and only when no action is already in flight.
     uint64_t rng_a = 111, rng_b = 222;
     bool over = false;
+    bool names_checked = false;
     int last_round = 0;
     for (int step = 0; step < 40000 && !over; step++) {
         pump(&a);
         pump(&b);
+        // Each client should see the other's chosen name as that seat's handle.
+        if (a.have_game && b.have_game && !names_checked) {
+            names_checked = true;
+            printf("  handles: A sees seat %d='%s'; B sees seat %d='%s'\n",
+                   b.my_seat, a.handles[b.my_seat], a.my_seat, b.handles[a.my_seat]);
+            CHECK(strcmp(a.handles[b.my_seat], "Bob") == 0);
+            CHECK(strcmp(b.handles[a.my_seat], "Alice") == 0);
+        }
         if (a.have_game && a.game.round_no != last_round) {
             last_round = a.game.round_no;
             printf("  round %d  scores %d/%d\n", last_round,
