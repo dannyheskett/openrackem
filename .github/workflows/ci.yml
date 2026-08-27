@@ -43,6 +43,8 @@ jobs:
         run: make server
       - name: Online end-to-end (daemon + two clients over loopback)
         run: make net-e2e
+      - name: Online multi-player (daemon + 2/3/4 real clients, full matches)
+        run: make net-multi
 
   windows:
     runs-on: ubuntu-22.04
