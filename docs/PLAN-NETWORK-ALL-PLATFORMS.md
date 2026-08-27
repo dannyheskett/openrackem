@@ -13,7 +13,7 @@ Current state:
 |---|---|---|
 | Linux | ✅ `wss` + `ws` | `net_posix.c`: from-scratch RFC 6455 over POSIX sockets, TLS via system OpenSSL |
 | macOS | ✅ `wss` + `ws` (NW2 done) | `net_apple.mm`: Network.framework (`NWProtocolWebSocket` + native TLS); OpenSSL retired from the mac build, fixing the arm64-only-OpenSSL universal-binary blocker |
-| Windows | ❌ none | `net_posix.c` is POSIX-only; Windows needs winsock2. Falls through to `net_stub` → menu hidden |
+| Windows | ✅ `wss` + `ws` (NW4 done) | `net_win.c`: winsock2 sockets + SChannel/SSPI TLS (cert+hostname validated, TLS 1.2); shares net_ws.c framing. Verified live on a windows-latest CI runner |
 | Web/WASM | ✅ `wss` (NW1 done) | `net_web.c`: emscripten WebSocket (browser owns framing + TLS) |
 | Android | ❌ none | `net_stub` (though Bionic has POSIX sockets — see §6) |
 | iOS | ✅ `wss` + `ws` (NW2 done) | `net_apple.mm`: same Network.framework backend as macOS |
@@ -234,12 +234,19 @@ lands, nothing else changes.
   `extern "C"` for the Obj-C++ seam; macOS CI runs `make mac-net-test` live.
 - **NW3 — Android.** Prebuilt OpenSSL arm64-v8a + bundled `cacert.pem` + INTERNET
   permission + resume-reconnect; reuse `net_posix`.
-- **NW4 — Windows.** `net_win.c` (winsock2 + SChannel) on the NW0 framing;
-  optional plain-`ws` first pass.
+- **NW4 — Windows. ✅ done.** `net_win.c` (winsock2 + SChannel) on the NW0
+  framing. Verified live on a `windows-latest` CI runner — **no external Windows
+  box needed**; GitHub's hosted Windows runner builds it with MinGW and runs the
+  smoke test against the Fly server, exactly as the mac job does for Apple. The
+  earlier "needs a real Windows box" caveat was about testing via wine on Linux
+  (which is unreliable), not about hosted CI, which is real Windows.
 
-NW0 (shared-framing refactor) is deferred until NW4 (Windows) is scheduled: it
-exists only to stop the Windows and Linux raw backends from drifting, and no
-raw backend but Linux has landed yet, so there is nothing to share prematurely.
+NW0 (shared framing) landed **with** NW4 (its first consumer): `net_ws.{c,h}` now
+back both raw backends, so Linux and Windows can't drift on the wire protocol.
+
+Only **NW3 (Android)** remains. Android online adds the `INTERNET` permission and
+network features; the app currently publishes only to Play's **internal** testing
+track (no public listing), so that is a low-stakes change, not a store-policy gate.
 
 Recommended order is by value-per-effort: **Web → Apple → Android → Windows**.
 Web and Apple are the cheapest and cover the most users (any browser; all Apple
