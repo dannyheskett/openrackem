@@ -20,6 +20,7 @@
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
 #include "net.h"
+#include "net_ws.h"
 #include <stdint.h>
 #include <stdio.h>
 
@@ -77,27 +78,12 @@ struct NetConn {
 #endif
 };
 
-static uint64_t rng_next(uint64_t* s) {
-    uint64_t x = *s ? *s : 0x2545F4914F6CDD1DULL;
-    x ^= x >> 12; x ^= x << 25; x ^= x >> 27;
-    *s = x;
-    return x * 2685821657736338717ULL;
-}
-
-static void b64(const uint8_t* in, size_t len, char* out) {
-    static const char T[] =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    size_t o = 0;
-    for (size_t i = 0; i < len; i += 3) {
-        uint32_t v = (uint32_t)in[i] << 16;
-        if (i + 1 < len) v |= (uint32_t)in[i + 1] << 8;
-        if (i + 2 < len) v |= in[i + 2];
-        out[o++] = T[(v >> 18) & 63];
-        out[o++] = T[(v >> 12) & 63];
-        out[o++] = (i + 1 < len) ? T[(v >> 6) & 63] : '=';
-        out[o++] = (i + 2 < len) ? T[v & 63] : '=';
-    }
-    out[o] = '\0';
+// Append a masked client frame; a full out buffer is a fatal transport error
+// (the caller can no longer stay in sync), matching the pre-extraction behavior.
+static void enq(NetConn* c, int opcode, const uint8_t* data, size_t len) {
+    if (nw_encode_frame(c->out, &c->out_len, NET_OUT_CAP, opcode, data, len,
+                        &c->rng) != 0)
+        c->status = NET_ERROR;
 }
 
 // --- Transport shim: raw socket, or OpenSSL when tls ------------------------
@@ -200,17 +186,8 @@ NetConn* net_connect(const char* host, int port, const char* path, bool tls) {
     }
 #endif
 
-    uint8_t key[16];
-    for (int i = 0; i < 16; i++) key[i] = (uint8_t)(rng_next(&c->rng) >> 24);
-    char key64[25];
-    b64(key, 16, key64);
-    // Host header without the port (matches the Fly edge's routing; the daemon
-    // ignores Host entirely).
-    snprintf(c->req, sizeof c->req,
-             "GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\n"
-             "Connection: Upgrade\r\nSec-WebSocket-Key: %s\r\n"
-             "Sec-WebSocket-Version: 13\r\n\r\n",
-             path && path[0] ? path : "/", host, key64);
+    if (nw_build_handshake(c->req, sizeof c->req, host, path, &c->rng) < 0)
+        c->status = NET_ERROR;
     return c;
 }
 
@@ -222,27 +199,6 @@ static void push_msg(NetConn* c, const uint8_t* data, size_t len) {
     c->msgq[c->q_tail][len] = '\0';
     c->msgq_len[c->q_tail] = (int)len;
     c->q_tail = next;
-}
-
-static void enqueue_frame(NetConn* c, int opcode, const uint8_t* data, size_t len) {
-    // Client frames are masked. Header is 2 or 4 bytes + 4 mask bytes.
-    size_t hdr = (len < 126) ? 2 : 4;
-    size_t need = hdr + 4 + len;
-    if (c->out_len + need > NET_OUT_CAP) { c->status = NET_ERROR; return; }
-    uint8_t* p = c->out + c->out_len;
-    p[0] = (uint8_t)(0x80 | (opcode & 0x0F));
-    if (len < 126) {
-        p[1] = (uint8_t)(0x80 | len);
-    } else {
-        p[1] = (uint8_t)(0x80 | 126);
-        p[2] = (uint8_t)(len >> 8);
-        p[3] = (uint8_t)len;
-    }
-    uint8_t mask[4];
-    for (int i = 0; i < 4; i++) mask[i] = (uint8_t)(rng_next(&c->rng) >> 17);
-    memcpy(p + hdr, mask, 4);
-    for (size_t i = 0; i < len; i++) p[hdr + 4 + i] = data[i] ^ mask[i & 3];
-    c->out_len += need;
 }
 
 static void try_write(NetConn* c) {
@@ -258,27 +214,6 @@ static void try_write(NetConn* c) {
             return;
         }
     }
-}
-
-// Decode server->client frames (unmasked). Returns bytes consumed, 0 if the
-// buffer holds a partial frame, -1 on protocol error.
-static int decode_frame(uint8_t* buf, size_t len, int* op, uint8_t** pl, size_t* pn) {
-    if (len < 2) return 0;
-    int fin = buf[0] & 0x80, rsv = buf[0] & 0x70, o = buf[0] & 0x0F;
-    int masked = buf[1] & 0x80;
-    size_t l = buf[1] & 0x7F;
-    if (rsv || masked || !fin || o == 0) return -1;   // server must not mask/fragment
-    size_t hdr = 2;
-    if (l == 127) return -1;
-    if (l == 126) {
-        if (len < 4) return 0;
-        l = (size_t)buf[2] << 8 | buf[3];
-        hdr = 4;
-    }
-    if (hdr + l > NET_IN_CAP) return -1;
-    if (len < hdr + l) return 0;
-    *op = o; *pl = buf + hdr; *pn = l;
-    return (int)(hdr + l);
 }
 
 static void try_read(NetConn* c) {
@@ -297,36 +232,29 @@ static void try_read(NetConn* c) {
     }
 
     if (c->handshaking) {
-        uint8_t* end = NULL;
-        for (size_t i = 0; i + 3 < c->in_len; i++) {
-            if (memcmp(c->in + i, "\r\n\r\n", 4) == 0) { end = c->in + i + 4; break; }
-        }
-        if (!end) {
+        long consumed = nw_parse_handshake(c->in, c->in_len);
+        if (consumed == 0) {
             // A full buffer with no header terminator can't make progress —
             // treat it as a bad handshake rather than stalling forever.
             if (c->in_len == NET_IN_CAP) c->status = NET_ERROR;
             return;
         }
-        if (c->in_len < 12 || memcmp(c->in, "HTTP/1.1 101", 12) != 0) {
-            c->status = NET_ERROR;
-            return;
-        }
-        size_t consumed = (size_t)(end - c->in);
-        memmove(c->in, end, c->in_len - consumed);
-        c->in_len -= consumed;
+        if (consumed < 0) { c->status = NET_ERROR; return; }   // not a 101 upgrade
+        memmove(c->in, c->in + consumed, c->in_len - (size_t)consumed);
+        c->in_len -= (size_t)consumed;
         c->handshaking = false;
         c->status = NET_OPEN;
     }
 
     while (c->status == NET_OPEN) {
         int op; uint8_t* pl; size_t pn;
-        int used = decode_frame(c->in, c->in_len, &op, &pl, &pn);
+        int used = nw_decode_frame(c->in, c->in_len, NET_IN_CAP, &op, &pl, &pn);
         if (used == 0) break;
         if (used < 0) { c->status = NET_ERROR; return; }
         if (op == 0x1) {                 // text
             push_msg(c, pl, pn);
         } else if (op == 0x9) {          // ping -> pong
-            enqueue_frame(c, 0xA, pl, pn);
+            enq(c, 0xA, pl, pn);
         } else if (op == 0x8) {          // close
             c->status = NET_CLOSED;
         }
@@ -379,7 +307,7 @@ NetStatus net_status(const NetConn* c) { return c ? c->status : NET_ERROR; }
 bool net_send(NetConn* c, const char* text, size_t len) {
     if (!c || c->status != NET_OPEN) return false;
     size_t before = c->out_len;
-    enqueue_frame(c, 0x1, (const uint8_t*)text, len);
+    enq(c, 0x1, (const uint8_t*)text, len);
     if (c->status == NET_ERROR) return false;
     if (c->out_len == before) return false;   // frame didn't fit
     try_write(c);
@@ -400,7 +328,7 @@ void net_close(NetConn* c) {
     if (!c) return;
     if (c->fd >= 0) {
         if (c->status == NET_OPEN) {
-            enqueue_frame(c, 0x8, NULL, 0);   // best-effort close frame
+            enq(c, 0x8, NULL, 0);   // best-effort close frame
             try_write(c);
         }
 #ifdef OR_TLS

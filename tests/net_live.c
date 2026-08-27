@@ -19,12 +19,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
+#ifdef _WIN32
+#include <windows.h>
+static void ms(int m) { Sleep((DWORD)m); }
+#else
+#include <time.h>
 static void ms(int m) {
     struct timespec t = { m / 1000, (long)(m % 1000) * 1000000L };
     nanosleep(&t, NULL);
 }
+#endif
 
 int main(void) {
     const char* host = getenv("H") ? getenv("H") : "openrackem-server.fly.dev";
