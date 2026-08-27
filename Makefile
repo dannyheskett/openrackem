@@ -617,15 +617,17 @@ $(AI_BENCH_BIN): tests/ai_bench.c $(wildcard src/*.c src/*.h) | $(OBJ_DIR)
 # Deterministic screenshots of every screen in both renderers (needs a
 # display). -DPLATFORM_WEB compiles both renderers into one native binary
 # (OR_RUNTIME_RENDERER); vis_shots.c supplies main(), so the emscripten loop
-# in main.c never enters the build.
+# in main.c never enters the build. The web net backend (net_web.c) needs the
+# emscripten SDK, so it is excluded and the no-op net_stub (via -DOR_NET_STUB)
+# satisfies netgame's link references — this harness never goes online.
 SHOTS_BIN := build/vis_shots
-SHOTS_SRC := $(filter-out src/main.c,$(SRC))
+SHOTS_SRC := $(filter-out src/main.c src/net_web.c,$(SRC))
 
 shots: $(SHOTS_BIN)
 	./$(SHOTS_BIN)
 
 $(SHOTS_BIN): tests/vis_shots.c $(wildcard src/*.c src/*.h) | $(OBJ_DIR)
-	gcc $(CFLAGS_COMMON) -O2 -DPLATFORM_WEB -I$(RAYLIB)/include \
+	gcc $(CFLAGS_COMMON) -O2 -DPLATFORM_WEB -DOR_NET_STUB -I$(RAYLIB)/include \
 	    tests/vis_shots.c $(SHOTS_SRC) -o $(SHOTS_BIN) $(LDFLAGS)
 
 # ---------------------------------------------------------------------------
