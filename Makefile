@@ -666,6 +666,18 @@ $(NET_E2E_BIN): tests/net_e2e.c src/netgame.c src/net_ws.c src/net_posix.c \
 	gcc -std=c99 -Wall -Wextra -O0 -g -Isrc tests/net_e2e.c src/netgame.c \
 	    src/net_ws.c src/net_posix.c src/rules.c src/game.c src/ai.c -o $(NET_E2E_BIN)
 
+# Online multi-player: real daemon + N real netgame clients over loopback playing
+# a full match, for N = 2, 3, 4. Same harness family as net-e2e, broader coverage.
+NET_MULTI_BIN := build/net_multi
+
+net-multi: $(NET_MULTI_BIN) $(SERVER_BIN)
+	./$(NET_MULTI_BIN)
+
+$(NET_MULTI_BIN): tests/net_multi.c src/netgame.c src/net_ws.c src/net_posix.c \
+                  src/rules.c src/game.c src/ai.c $(wildcard src/*.h) | $(OBJ_DIR)
+	gcc -std=c99 -Wall -Wextra -O0 -g -Isrc tests/net_multi.c src/netgame.c \
+	    src/net_ws.c src/net_posix.c src/rules.c src/game.c src/ai.c -o $(NET_MULTI_BIN)
+
 # Live-server smoke test: two headless clients connect to the REAL deployed
 # daemon and create+join a game, proving the wss/TLS transport end to end.
 # Linux variant links net_posix + system OpenSSL. Needs network egress to
@@ -793,6 +805,6 @@ clean:
 # Pull in auto-generated header dependencies (ignored if not yet present).
 -include $(OBJ:.o=.d) $(REL_OBJ:.o=.d) $(WIN64_OBJ:.o=.d) $(WIN32_OBJ:.o=.d) $(MAC_OBJ:.o=.d)
 
-.PHONY: all run release run-release windows mac web web-serve test ai-bench shots server server-run net-e2e net-live mac-net-test win-net-build win-net-test android-net-build clean \
+.PHONY: all run release run-release windows mac web web-serve test ai-bench shots server server-run net-e2e net-multi net-live mac-net-test win-net-build win-net-test android-net-build clean \
         android android-play ios ios-sim \
         dist dist-linux dist-windows dist-mac dist-web dist-android dist-android-play dist-ios

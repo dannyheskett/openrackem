@@ -230,7 +230,13 @@ void draw_menu_panel(MenuLayout m, const char* title, const char* const* items,
                      int count, int selected, int gap_before, bool capture) {
     gfx_rect(m.px, m.py, m.panel_w, m.panel_h, (Color){15, 15, 25, 255});
     gfx_rect_lines(m.px, m.py, m.panel_w, m.panel_h, LIGHTGRAY);
-    gfx_text(title, m.cx - gfx_measure_text(title, m.title_size) / 2, m.title_y, m.title_size, WHITE);
+    // Shrink a long title to fit inside the panel (e.g. "WAITING FOR PLAYERS"),
+    // then re-center it in the original title band.
+    int ts = m.title_size;
+    int maxw = m.panel_w - 24;
+    while (ts > 10 && gfx_measure_text(title, ts) > maxw) ts -= 2;
+    gfx_text(title, m.cx - gfx_measure_text(title, ts) / 2,
+             m.title_y + (m.title_size - ts) / 2, ts, WHITE);
 
     s_menu_item_count = capture ? ((count < 8) ? count : 8) : 0;
     int y = m.items_y;
