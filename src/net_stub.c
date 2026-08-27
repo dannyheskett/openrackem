@@ -1,12 +1,12 @@
-// No-op net.h backend for platforms that don't ship an online client yet
-// (Android only, now that Windows has net_win.c). net_available() returns false,
-// so main.c hides "Play Online" there. Web uses net_web.c (native browser
-// WebSocket); Linux uses net_posix.c (OpenSSL); macOS/iOS use net_apple.mm
-// (Network.framework); Windows uses net_win.c (winsock2 + SChannel). Exactly one
-// backend provides these symbols per platform.
+// No-op net.h backend, kept as the fallback for any future platform that ships
+// without an online client. No platform currently selects it — Linux/Android use
+// net_posix.c (OpenSSL), Web uses net_web.c (browser WebSocket), macOS/iOS use
+// net_apple.mm (Network.framework), Windows uses net_win.c (winsock2 + SChannel).
+// Guarded off (OR_NET_STUB is never defined) so it stays an empty translation
+// unit everywhere and never collides with a real backend's symbols.
 #include "net.h"
 
-#if defined(PLATFORM_ANDROID)
+#if defined(OR_NET_STUB)
 
 NetConn* net_connect(const char* host, int port, const char* path, bool tls) {
     (void)host; (void)port; (void)path; (void)tls;

@@ -184,6 +184,11 @@ ANDROID_VERSION_NAME ?= 1.0.$(ANDROID_VERSION_CODE)
 
 RAYLIB_ANDROID := third_party/raylib-install-android/$(ANDROID_ABI)
 
+# Static OpenSSL for wss:// (built by scripts/build_openssl_android.sh, like the
+# per-ABI raylib) and the embedded CA bundle header (scripts/gen_cacert.py).
+OPENSSL_ANDROID := third_party/openssl-android/$(ANDROID_ABI)
+CACERT_HDR      := third_party/cacert/cacert_pem.h
+
 ANDROID_TOOLCHAIN := $(ANDROID_NDK)/toolchains/llvm/prebuilt/linux-x86_64
 ANDROID_CC        := $(ANDROID_TOOLCHAIN)/bin/aarch64-linux-android$(ANDROID_API)-clang
 NATIVE_APP_GLUE   := $(ANDROID_NDK)/sources/android/native_app_glue
@@ -193,6 +198,7 @@ ANDROID_JAR    := $(ANDROID_SDK_ROOT)/platforms/android-$(ANDROID_PLATFORM_VER)/
 
 ANDROID_SRC     := $(filter-out src/encode_h264.c src/encode_mux.c,$(SRC))
 ANDROID_CFLAGS  := -std=c99 -Wall -Wextra -Isrc -DPLATFORM_ANDROID -fPIC \
+                   -DOR_TLS -I$(OPENSSL_ANDROID)/include -Ithird_party/cacert \
                    -I$(RAYLIB_ANDROID)/include -I$(NATIVE_APP_GLUE)
 
 # SIMSTATS=1 builds the high-refresh validation APK: it boots straight into
@@ -214,6 +220,7 @@ endif
 ANDROID_LDFLAGS := -shared -L$(RAYLIB_ANDROID)/lib -lraylib \
                    -Wl,--wrap=fopen \
                    -Wl,-z,max-page-size=16384,-z,common-page-size=16384 \
+                   -L$(OPENSSL_ANDROID)/lib -lssl -lcrypto \
                    -llog -landroid -lEGL -lGLESv2 -lOpenSLES -lm -lc -ldl
 
 # Separate object dir for SIMSTATS builds so the -D flags never mix with a
@@ -249,6 +256,15 @@ $(ANDROID_OBJ_DIR)/native_app_glue.o: $(NATIVE_APP_GLUE)/android_native_app_glue
 
 $(ANDROID_OBJ_DIR)/%.o: src/%.c | $(ANDROID_OBJ_DIR)
 	$(ANDROID_CC) $(ANDROID_CFLAGS) -MMD -MP -c $< -o $@
+
+# The embedded CA bundle header — Android only, regenerated at build time and
+# gitignored. net_posix.c #includes it under PLATFORM_ANDROID, so it must exist
+# before that object compiles.
+$(CACERT_HDR):
+	@mkdir -p $(dir $@)
+	python3 scripts/gen_cacert.py $@
+
+$(ANDROID_OBJ_DIR)/net_posix.o: $(CACERT_HDR)
 
 $(ANDROID_LIB): $(ANDROID_OBJ)
 	@mkdir -p $(dir $@)
@@ -692,6 +708,24 @@ win-net-build:
 win-net-test: win-net-build
 	./build/net_live.exe
 
+# Android: the live smoke test as a PLATFORM_ANDROID native x86_64 executable,
+# linked against Bionic + static OpenSSL + the embedded CA bundle. The android-net
+# CI job pushes it to an x86_64 emulator (real Android userspace) and runs it
+# against the Fly server — functional proof of the Android wss client with no
+# physical device, mirroring the win-net / mac jobs. Requires the NDK and the
+# x86_64 OpenSSL (scripts/build_openssl_android.sh x86_64).
+ANDROID_X64_CC      := $(ANDROID_TOOLCHAIN)/bin/x86_64-linux-android$(ANDROID_API)-clang
+OPENSSL_ANDROID_X64 := third_party/openssl-android/x86_64
+ANDROID_NET_BIN     := build/net_live_android
+
+android-net-build: $(CACERT_HDR)
+	mkdir -p build
+	$(ANDROID_X64_CC) -std=c99 -Wall -Wextra -O2 -Isrc -DPLATFORM_ANDROID -DOR_TLS \
+	    -Ithird_party/cacert -I$(OPENSSL_ANDROID_X64)/include \
+	    tests/net_live.c src/netgame.c src/net_ws.c src/net_posix.c \
+	    src/rules.c src/game.c src/ai.c \
+	    -L$(OPENSSL_ANDROID_X64)/lib -lssl -lcrypto -lm -ldl -o $(ANDROID_NET_BIN)
+
 # ---------------------------------------------------------------------------
 # Distribution archives. Each dist-<platform> stages the platform binary plus
 # README.md + LICENSE + NOTICE and packages it under dist/. Driven by the
@@ -755,6 +789,6 @@ clean:
 # Pull in auto-generated header dependencies (ignored if not yet present).
 -include $(OBJ:.o=.d) $(REL_OBJ:.o=.d) $(WIN64_OBJ:.o=.d) $(WIN32_OBJ:.o=.d) $(MAC_OBJ:.o=.d)
 
-.PHONY: all run release run-release windows mac web web-serve test ai-bench shots server server-run net-e2e net-live mac-net-test win-net-build win-net-test clean \
+.PHONY: all run release run-release windows mac web web-serve test ai-bench shots server server-run net-e2e net-live mac-net-test win-net-build win-net-test android-net-build clean \
         android android-play ios ios-sim \
         dist dist-linux dist-windows dist-mac dist-web dist-android dist-android-play dist-ios

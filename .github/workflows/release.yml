@@ -285,6 +285,8 @@ jobs:
           echo "ANDROID_NDK=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
       - name: Build raylib (Android, arm64-v8a)
         run: ./scripts/build_raylib_android.sh
+      - name: Build OpenSSL (Android arm64-v8a, static — wss online client)
+        run: ./scripts/build_openssl_android.sh arm64-v8a
       - name: Package sideload APK (debug-signed)
         run: |
           make dist-android \
