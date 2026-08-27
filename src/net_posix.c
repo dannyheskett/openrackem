@@ -127,8 +127,11 @@ static int t_read(NetConn* c, void* buf, size_t len) {
         int e = SSL_get_error(c->ssl, n);
         if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) return T_AGAIN;
         if (e == SSL_ERROR_ZERO_RETURN) return 0;   // clean TLS close_notify
-        if (getenv("OR_NET_DIAG"))
-            fprintf(stderr, "[net_posix] fail@ssl_read sslerr=%d errno=%d\n", e, errno);
+        if (getenv("OR_NET_DIAG")) {
+            char eb[160]; ERR_error_string_n(ERR_peek_last_error(), eb, sizeof eb);
+            fprintf(stderr, "[net_posix] fail@ssl_read sslerr=%d errno=%d hs=%d status=%d reason=%s\n",
+                    e, errno, c->handshaking, (int)c->status, eb);
+        }
         return T_ERR;
     }
 #endif
