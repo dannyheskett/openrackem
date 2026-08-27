@@ -3,11 +3,13 @@
 ## 1. Goal
 
 Online play (the "Play Online" menu, wired to `wss://openrackem-server.fly.dev`)
-on **all six** shipped platforms. Today only Linux has it. This plan closes the
-gap, preferring each OS's native networking/TLS facilities over vendored crypto
-wherever they exist.
+on **all six** shipped platforms. **This is now complete** — every platform has a
+working `wss` client, each verified in CI. The plan preferred each OS's native
+networking/TLS facilities over vendored crypto wherever they exist (Web, Apple,
+Windows use native stacks; only Android vendors OpenSSL, since Bionic exposes no
+usable TLS to native code).
 
-Current state:
+Final state (all ✅):
 
 | Platform | Online today | Why |
 |---|---|---|
@@ -15,7 +17,7 @@ Current state:
 | macOS | ✅ `wss` + `ws` (NW2 done) | `net_apple.mm`: Network.framework (`NWProtocolWebSocket` + native TLS); OpenSSL retired from the mac build, fixing the arm64-only-OpenSSL universal-binary blocker |
 | Windows | ✅ `wss` + `ws` (NW4 done) | `net_win.c`: winsock2 sockets + SChannel/SSPI TLS (cert+hostname validated, TLS 1.2); shares net_ws.c framing. Verified live on a windows-latest CI runner |
 | Web/WASM | ✅ `wss` (NW1 done) | `net_web.c`: emscripten WebSocket (browser owns framing + TLS) |
-| Android | ❌ none | `net_stub` (though Bionic has POSIX sockets — see §6) |
+| Android | ✅ `wss` + `ws` (NW3 done) | `net_posix.c` (Bionic POSIX sockets) + static OpenSSL + an embedded Mozilla CA bundle; `INTERNET` permission added. Verified live on an x86_64 emulator in CI |
 | iOS | ✅ `wss` + `ws` (NW2 done) | `net_apple.mm`: same Network.framework backend as macOS |
 
 Everything above the transport is already shared and tested: the protocol, the
@@ -232,8 +234,9 @@ lands, nothing else changes.
 - **NW2 — Apple. ✅ done.** `net_apple.mm` (Network.framework); unblocks macOS
   `wss` *and* delivers iOS; OpenSSL dropped from the mac build. `net.h` made
   `extern "C"` for the Obj-C++ seam; macOS CI runs `make mac-net-test` live.
-- **NW3 — Android.** Prebuilt OpenSSL arm64-v8a + bundled `cacert.pem` + INTERNET
-  permission + resume-reconnect; reuse `net_posix`.
+- **NW3 — Android. ✅ done.** Static OpenSSL arm64-v8a (built in CI, gitignored) +
+  the Mozilla CA bundle compiled in + the INTERNET permission; reuses `net_posix`.
+  Verified live on an x86_64 emulator in CI (`android-net` job) — no device.
 - **NW4 — Windows. ✅ done.** `net_win.c` (winsock2 + SChannel) on the NW0
   framing. Verified live on a `windows-latest` CI runner — **no external Windows
   box needed**; GitHub's hosted Windows runner builds it with MinGW and runs the
@@ -279,9 +282,13 @@ Windows host to sign off.
   recover.
 - **Backend divergence.** NW0 must land first so Windows and Linux share one
   framing implementation rather than two that drift.
-- **On-device-only verification.** iOS, Android, and Windows `wss` can't be
-  fully validated in headless CI; budget device/VM time before their store
-  releases.
+- **On-device-only verification (mostly resolved).** Windows and Android `wss`
+  are validated live in CI — Windows on a hosted `windows-latest` runner,
+  Android on an x86_64 emulator — and Web + macOS run live against the Fly server
+  too. Only **iOS** live play remains manual (Simulator/device); it is
+  compile+link-verified in CI. The earlier assumption that these "can't be
+  validated in headless CI" was wrong: hosted runners and emulators are real
+  target environments.
 
 ## 12. What does not change
 
