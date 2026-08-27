@@ -39,7 +39,8 @@ typedef struct {
     int      my_seat;
     char     code[8];      // room code (create/join)
     char     token[33];    // seat token, for reconnect
-    char     handles[MAX_PLAYERS][8];
+    char     handles[MAX_PLAYERS][16];  // seat display names (server-assigned or chosen)
+    char     name[16];     // our chosen player name, sent on join (sanitized alnum)
     uint8_t  ai[MAX_PLAYERS];   // which seats are AI-controlled right now
     int      players;
     int      queue_pos;
@@ -66,9 +67,11 @@ typedef struct {
 
 // Open a session. `join` selects the flow; `code` is used for NG_JOIN_CODE.
 // `rules` supplies create parameters (players/bonus/partners/target); ignored
-// for quick/join.
+// for quick/join. `name` is the chosen player name sent to the server (may be
+// NULL/empty; sanitized to alphanumerics internally).
 void netgame_start(NetGame* ng, const char* host, int port, bool tls,
-                   NgJoin join, const char* code, const Rules* rules);
+                   NgJoin join, const char* code, const Rules* rules,
+                   const char* name);
 
 // One frame: pump the socket, apply any arrived state, advance the local
 // animation clock. Returns the events word from a state that just arrived

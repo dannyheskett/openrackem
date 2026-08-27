@@ -17,10 +17,12 @@
 #endif
 
 #include "netgame.h"
+#include "prefs.h"
 
 typedef enum {
     STATE_MENU,
     STATE_OPTIONS,
+    STATE_NAME,         // editing the persisted player name
     STATE_PLAYING,
     STATE_PAUSED,
     STATE_ONLINE_MENU,  // choose quick / create / join (net builds only)
@@ -100,13 +102,15 @@ static int build_menu(bool resumable, const char* labels[], MenuAction actions[]
 
 // The Options screen items. Values cycle with Left/Right (or Select); the last
 // item returns to the menu. Labels are rebuilt every frame from the live Rules.
-#define OPT_ITEMS 6
-enum { OPT_PLAYERS, OPT_DIFFICULTY, OPT_BONUS, OPT_PARTNERS, OPT_TARGET, OPT_BACK };
+#define OPT_ITEMS 7
+enum { OPT_NAME, OPT_PLAYERS, OPT_DIFFICULTY, OPT_BONUS, OPT_PARTNERS, OPT_TARGET, OPT_BACK };
 
 static int build_options(const char* labels[]) {
     static char buf[OPT_ITEMS][32];
     static const char* DIFF_NAMES[3] = {"Easy", "Normal", "Hard"};
     Rules* r = current_options();
+    const char* nm = prefs_name();
+    snprintf(buf[OPT_NAME],       sizeof buf[0], "Name: %s", (nm && nm[0]) ? nm : "(not set)");
     snprintf(buf[OPT_PLAYERS],    sizeof buf[0], "Players: %d", r->player_count);
     snprintf(buf[OPT_DIFFICULTY], sizeof buf[0], "Difficulty: %s", DIFF_NAMES[r->ai_difficulty]);
     snprintf(buf[OPT_BONUS],      sizeof buf[0], "Bonus Scoring: %s", r->bonus_scoring ? "On" : "Off");
@@ -215,6 +219,8 @@ typedef struct {
     int online_sel;    // cursor on the online submenu
     char join_code[8]; // code being entered on the Join screen
     int code_cursor;   // active slot on the Join screen (0..5)
+    char name_buf[16]; // player name being edited (STATE_NAME)
+    int name_cursor;   // active slot on the Name screen (0..NAME_MAX-1)
 } AppCtx;
 
 // Synthesize the acting player's Action for this frame from keyboard and
@@ -321,6 +327,21 @@ static int join_screen(AppCtx* c, const Input* in) {
         for (int i = 0; i < 6; i++) c->join_code[i] = 'A';
         c->join_code[6] = '\0';
     }
+    // Keyboard: type the code directly (case-insensitive, filtered to the
+    // room-code alphabet); backspace steps back. Coexists with the slot picker.
+    for (int i = 0; i < in->text_len; i++) {
+        char ch = in->text_input[i];
+        if (ch >= 'a' && ch <= 'z') ch = (char)(ch - 'a' + 'A');
+        if (strchr(CODE_ALPHABET, ch)) {
+            c->join_code[c->code_cursor] = ch;
+            if (c->code_cursor < 5) c->code_cursor++;
+            sound_play(SFX_MENU_MOVE);
+        }
+    }
+    if (in->backspace_pressed) {
+        if (c->code_cursor > 0) c->code_cursor--;
+        c->join_code[c->code_cursor] = 'A';
+    }
     if (in->menu_left)  c->code_cursor = (c->code_cursor + 5) % 6;
     if (in->menu_right) c->code_cursor = (c->code_cursor + 1) % 6;
     if (in->menu_up || in->menu_down) {
@@ -332,6 +353,64 @@ static int join_screen(AppCtx* c, const Input* in) {
         sound_play(SFX_MENU_MOVE);
     }
     if (in->confirm_pressed) return 1;
+    return 0;
+}
+
+// --- Name entry (persisted player name) --------------------------------------
+#define NAME_MAX 12
+// Space (blank slot) first; kept identifier-safe to match the server's handle
+// sanitizer. Keyboard fills slots left-to-right; touch swipes cycle/move.
+static const char NAME_ALPHABET[] = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
+static void name_edit_begin(AppCtx* c) {
+    const char* nm = prefs_name();
+    int len = (int)strlen(nm);
+    for (int i = 0; i < NAME_MAX; i++) c->name_buf[i] = (i < len) ? nm[i] : ' ';
+    c->name_buf[NAME_MAX] = '\0';
+    c->name_cursor = 0;
+}
+
+static void name_edit_save(const AppCtx* c) {
+    // Concatenate the slots, drop blanks, and persist (blanks are only a slot
+    // placeholder, never part of the name).
+    char out[NAME_MAX + 1];
+    int j = 0;
+    for (int i = 0; i < NAME_MAX; i++)
+        if (c->name_buf[i] != ' ') out[j++] = c->name_buf[i];
+    out[j] = '\0';
+    prefs_set_name(out);
+    prefs_save();
+}
+
+// The Name screen: keyboard types alphanumerics into the slots (backspace
+// deletes); touch swipes move the slot (left/right) and cycle the letter
+// (up/down). Returns 1 to save+exit, -1 to cancel, 0 to stay.
+static int name_screen(AppCtx* c, const Input* in) {
+    if (in->escape_pressed) return -1;
+    for (int i = 0; i < in->text_len; i++) {
+        char ch = in->text_input[i];
+        if (ch >= 'a' && ch <= 'z') ch = (char)(ch - 'a' + 'A');
+        if (ch != ' ' && strchr(NAME_ALPHABET, ch)) {
+            c->name_buf[c->name_cursor] = ch;
+            if (c->name_cursor < NAME_MAX - 1) c->name_cursor++;
+            sound_play(SFX_MENU_MOVE);
+        }
+    }
+    if (in->backspace_pressed) {
+        if (c->name_cursor > 0) c->name_cursor--;
+        c->name_buf[c->name_cursor] = ' ';
+    }
+    if (in->menu_left)  c->name_cursor = (c->name_cursor + NAME_MAX - 1) % NAME_MAX;
+    if (in->menu_right) c->name_cursor = (c->name_cursor + 1) % NAME_MAX;
+    if (in->menu_up || in->menu_down) {
+        const char* pos = strchr(NAME_ALPHABET, c->name_buf[c->name_cursor]);
+        int idx = pos ? (int)(pos - NAME_ALPHABET) : 0;
+        int n = (int)(sizeof NAME_ALPHABET - 1);
+        idx = (idx + (in->menu_up ? 1 : n - 1)) % n;
+        c->name_buf[c->name_cursor] = NAME_ALPHABET[idx];
+        sound_play(SFX_MENU_MOVE);
+    }
+    if (in->confirm_pressed || in->touch_tap) return 1;
     return 0;
 }
 
@@ -380,6 +459,11 @@ static void render_online(const AppCtx* c) {
 // emscripten_set_main_loop callback signature).
 static void frame_step(void* arg) {
     AppCtx* c = (AppCtx*)arg;
+
+    // Load persisted prefs (player name) once, on the first frame — works on
+    // every platform, including iOS where main() is compiled out.
+    static bool prefs_ready = false;
+    if (!prefs_ready) { prefs_load(); prefs_ready = true; }
 
     // Real seconds since the previous frame, feeding the fixed-timestep
     // accumulator so presentation runs at 60 Hz on any display refresh. The
@@ -488,9 +572,27 @@ static void frame_step(void* arg) {
             c->state = STATE_MENU;
             c->selected = 0;
             sound_play(SFX_MENU_SELECT);
+        } else if (do_select && c->selected == OPT_NAME) {
+            name_edit_begin(c);
+            c->state = STATE_NAME;
+            sound_play(SFX_MENU_SELECT);
+        } else if (c->selected == OPT_NAME) {
+            // Name row: left/right don't cycle a value; only select opens it.
         } else if (dir != 0 || do_select) {
             cycle_option(c->selected, dir ? dir : 1);
             sound_play(SFX_MENU_SELECT);
+        }
+        break; // rendered by the per-state dispatch below
+    }
+
+    case STATE_NAME: {
+        int res = name_screen(c, &in);
+        if (res == 1) {
+            name_edit_save(c);
+            c->state = STATE_OPTIONS;
+            sound_play(SFX_MENU_SELECT);
+        } else if (res == -1) {
+            c->state = STATE_OPTIONS;
         }
         break; // rendered by the per-state dispatch below
     }
@@ -612,7 +714,7 @@ static void frame_step(void* arg) {
         } else if (oc >= 0) {
             NgJoin j = (oc == ONL_CREATE) ? NG_JOIN_CREATE : NG_JOIN_QUICK;
             netgame_start(&c->net, server_host(), server_port(), server_tls(), j,
-                          NULL, current_options());
+                          NULL, current_options(), prefs_name());
             c->ui = (TableUi){ .cursor = 0, .standings = false };
             c->state = STATE_ONLINE;
             sound_play(SFX_MENU_SELECT);
@@ -625,7 +727,7 @@ static void frame_step(void* arg) {
         if (r < 0) { c->state = STATE_ONLINE_MENU; break; }
         if (r > 0) {
             netgame_start(&c->net, server_host(), server_port(), server_tls(),
-                          NG_JOIN_CODE, c->join_code, current_options());
+                          NG_JOIN_CODE, c->join_code, current_options(), prefs_name());
             c->ui = (TableUi){ .cursor = 0, .standings = false };
             c->state = STATE_ONLINE;
             sound_play(SFX_MENU_SELECT);
@@ -670,6 +772,13 @@ static void frame_step(void* arg) {
     }
     }
 
+    // Online opponents show their chosen names (server handles); offline seats
+    // fall back to "CPU N".
+    if (c->state == STATE_ONLINE && c->net.have_game)
+        render_set_seat_labels(c->net.handles, c->net.players);
+    else
+        render_clear_seat_labels();
+
     // Render for the state we ended the frame in. Every state must be handled
     // here: a same-frame transition (menu -> options) otherwise falls into a
     // branch whose data doesn't exist yet (there is no game before New Game).
@@ -679,6 +788,19 @@ static void frame_step(void* arg) {
         const char* opt_labels[OPT_ITEMS];
         int opt_count = build_options(opt_labels);
         render_menu("OPTIONS", opt_labels, opt_count, c->selected, OPT_BACK);
+    } else if (c->state == STATE_NAME) {
+        // Show the name with the active slot bracketed, blanks as underscores.
+        char shown[40] = {0};
+        int p = 0;
+        for (int i = 0; i < NAME_MAX && p < 36; i++) {
+            char ch = (c->name_buf[i] == ' ') ? '_' : c->name_buf[i];
+            if (i == c->name_cursor) p += snprintf(shown + p, sizeof shown - p, "[%c]", ch);
+            else                     p += snprintf(shown + p, sizeof shown - p, "%c", ch);
+        }
+        const char* lines[] = { shown,
+                                "Type your name, or swipe to edit",
+                                "Enter / tap: save    Esc: cancel" };
+        render_menu("YOUR NAME", lines, 3, -1, -1);
     } else if (c->state == STATE_PAUSED) {
         render_pause(c->game, &c->ui);
     } else if (c->state == STATE_ONLINE_MENU || c->state == STATE_ONLINE) {

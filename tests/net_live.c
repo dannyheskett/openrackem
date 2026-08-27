@@ -44,7 +44,7 @@ int main(void) {
     Rules r = rules_default();
     r.player_count = 2;
     r.target_score = 50;
-    netgame_start(&a, host, port, tls, NG_JOIN_CREATE, NULL, &r);
+    netgame_start(&a, host, port, tls, NG_JOIN_CREATE, NULL, &r, "Ava");
 
     // A creates the room; wait (bounded) for its code.
     for (int i = 0; i < 5000 && a.code[0] == '\0'; i++) {
@@ -54,7 +54,7 @@ int main(void) {
     if (a.code[0] == '\0') { printf("FAIL: no room code (connect failed)\n"); return 1; }
     printf("  created room %s\n", a.code);
 
-    netgame_start(&b, host, port, tls, NG_JOIN_CODE, a.code, NULL);
+    netgame_start(&b, host, port, tls, NG_JOIN_CODE, a.code, NULL, "Bo");
 
     // Both clients must reach a live game (state received => full round trip).
     int64_t deadline_steps = 20000;   // ~60s of pumping

@@ -43,6 +43,17 @@ static void poll_keyboard(Input* in) {
     in->select_pressed = in->confirm_pressed;
     in->escape_pressed = IsKeyPressed(KEY_ESCAPE);
 
+    // Text entry: drain this frame's printable characters (name / room-code
+    // fields) and note a backspace edge (with key-repeat for held delete). The
+    // char queue is separate from the key queue drained below.
+    int ci = 0, cp;
+    while (ci < (int)sizeof in->text_input - 1 && (cp = GetCharPressed()) != 0) {
+        if (cp >= 32 && cp < 127) in->text_input[ci++] = (char)cp;
+    }
+    in->text_input[ci] = '\0';
+    in->text_len = (uint8_t)ci;
+    in->backspace_pressed = IsKeyPressed(KEY_BACKSPACE) || IsKeyPressedRepeat(KEY_BACKSPACE);
+
     // Any key (drains one entry from the per-frame key-press queue).
     in->any_pressed = GetKeyPressed() != 0;
 }
@@ -139,9 +150,12 @@ static void poll_touch(Input* in) {
     }
 
     // Swipe gestures drive menu navigation (taps are decided on release, above).
+    // Left/right move the active slot on the name / room-code pickers.
     int g = GetGestureDetected();
-    if (g == GESTURE_SWIPE_UP)   in->menu_up   = true;
-    if (g == GESTURE_SWIPE_DOWN) in->menu_down = true;
+    if (g == GESTURE_SWIPE_UP)    in->menu_up    = true;
+    if (g == GESTURE_SWIPE_DOWN)  in->menu_down  = true;
+    if (g == GESTURE_SWIPE_LEFT)  in->menu_left  = true;
+    if (g == GESTURE_SWIPE_RIGHT) in->menu_right = true;
 
 #if !defined(PLATFORM_IOS)
     // Android hardware/gesture Back button (KEY_BACK); harmless no-op on web.

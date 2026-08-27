@@ -29,14 +29,51 @@ const Color CARD_EDGE  = { 90,  90,  90, 255};
 const Color SLOT_LABEL = {150, 156, 170, 255};
 const Color ACCENT     = {253, 249,   0, 255};   // raylib YELLOW
 
-// A card at (x, y, w, h). Face up: pale face with the value centered at a size
-// that fits two digits. Face down: the back colour with an inset border, the
-// classic printed-back look. `highlight` outlines in the accent colour.
+static Color lighten(Color c, int d) {
+    int r = c.r + d, g = c.g + d, b = c.b + d;
+    return (Color){ r > 255 ? 255 : r, g > 255 ? 255 : g, b > 255 ? 255 : b, c.a };
+}
+static Color with_alpha(Color c, unsigned char a) { c.a = a; return c; }
+
+// Corner radius scaled to the card height, clamped so tiny cards (opponent
+// backs, mini-racks) still round cleanly.
+static int card_radius(int h) {
+    int r = h / 6;
+    if (r < 3) r = 3;
+    if (r > 8) r = 8;
+    return r;
+}
+
+// A card at (x, y, w, h): rounded body with a soft drop shadow and, face up, a
+// subtle top sheen and the value centered at a size that fits two digits. Face
+// down shows the printed-back frame. `highlight` adds an accent glow + border
+// (the selection / current-turn affordance). Palette is unchanged.
 void draw_card(int x, int y, int w, int h, int value, bool face_up, bool highlight) {
-    gfx_rect(x, y, w, h, face_up ? CARD_FACE : CARD_BACK);
-    gfx_rect_lines(x, y, w, h, highlight ? ACCENT : CARD_EDGE);
-    if (highlight) gfx_rect_lines(x - 1, y - 1, w + 2, h + 2, ACCENT);
+    int r = card_radius(h);
+
+    // Soft drop shadow (two stacked translucent rounded rects, offset down-right).
+    gfx_rect_rounded(x + 2, y + 3, w, h, r, with_alpha((Color){0, 0, 0, 255}, 45));
+    gfx_rect_rounded(x + 1, y + 2, w, h, r, with_alpha((Color){0, 0, 0, 255}, 30));
+
+    // Selection glow, spreading beyond the card edges.
+    if (highlight) {
+        gfx_rect_rounded(x - 3, y - 3, w + 6, h + 6, r + 3, with_alpha(ACCENT, 55));
+        gfx_rect_rounded(x - 2, y - 2, w + 4, h + 4, r + 2, with_alpha(ACCENT, 95));
+    }
+
+    // Border ring, then the inset body (thicker accent border when highlighted).
+    int bt = highlight ? 2 : 1;
+    int ir = r - bt < 1 ? 1 : r - bt;
+    gfx_rect_rounded(x, y, w, h, r, highlight ? ACCENT : CARD_EDGE);
+
     if (face_up) {
+        gfx_rect_rounded(x + bt, y + bt, w - 2 * bt, h - 2 * bt, ir, CARD_FACE);
+        // Top sheen: a gentle vertical gradient over the interior, inset by the
+        // radius so its square corners stay within the rounded face.
+        if (w > 2 * r + 2 && h > 8) {
+            gfx_rect_gradient_v(x + r, y + bt + 1, w - 2 * r, (h - 2 * bt) * 3 / 5,
+                                lighten(CARD_FACE, 16), CARD_FACE);
+        }
         char txt[4];
         snprintf(txt, sizeof txt, "%d", value);
         int fs = h * 7 / 10;
@@ -45,11 +82,15 @@ void draw_card(int x, int y, int w, int h, int value, bool face_up, bool highlig
         gfx_text(txt, x + (w - gfx_measure_text(txt, fs)) / 2, y + (h - fs) / 2,
                  fs, CARD_TEXT);
     } else {
-        // Inset border pattern on the back.
-        int inset = (w / 8 < 2) ? 2 : w / 8;
-        if (w > 2 * inset + 2 && h > 2 * inset + 2) {
-            gfx_rect_lines(x + inset, y + inset, w - 2 * inset, h - 2 * inset,
-                           (Color){200, 160, 120, 255});
+        gfx_rect_rounded(x + bt, y + bt, w - 2 * bt, h - 2 * bt, ir, CARD_BACK);
+        // Printed-back frame: a tan ring inset from the edge.
+        int inset = (w / 7 < 3) ? 3 : w / 7;
+        int fr = ir - 1 < 1 ? 1 : ir - 1;
+        if (w > 2 * inset + 4 && h > 2 * inset + 4) {
+            gfx_rect_rounded(x + inset, y + inset, w - 2 * inset, h - 2 * inset, fr,
+                             (Color){200, 160, 120, 255});
+            gfx_rect_rounded(x + inset + 2, y + inset + 2, w - 2 * inset - 4,
+                             h - 2 * inset - 4, fr > 2 ? fr - 2 : 1, CARD_BACK);
         }
     }
 }
@@ -65,6 +106,22 @@ void draw_mini_rack(int x, int y, int cw, int ch, const Rack* rack, bool face_up
     }
 }
 
+// Optional per-seat display labels (online handles). Set while an online game is
+// on screen so opponents show their chosen names (or the server's directional
+// default) instead of "CPU N"; the local seat still shows "YOU". Cleared for
+// offline play.
+static char s_seat_labels[MAX_PLAYERS][16];
+static bool s_seat_labels_on = false;
+
+void render_set_seat_labels(const char labels[][16], int count) {
+    if (count > MAX_PLAYERS) count = MAX_PLAYERS;
+    for (int i = 0; i < count; i++)
+        snprintf(s_seat_labels[i], sizeof s_seat_labels[i], "%s", labels[i]);
+    for (int i = count < 0 ? 0 : count; i < MAX_PLAYERS; i++) s_seat_labels[i][0] = '\0';
+    s_seat_labels_on = true;
+}
+void render_clear_seat_labels(void) { s_seat_labels_on = false; }
+
 const char* seat_name(const Game* g, int seat) {
     static char buf[MAX_PLAYERS][8];
     // Defensive clamp: buf is indexed by seat, so an out-of-range value (from
@@ -72,6 +129,7 @@ const char* seat_name(const Game* g, int seat) {
     // rejects such states, but this is the last line before the memory write.
     if (seat < 0 || seat >= MAX_PLAYERS) return "?";
     if (seat == g->rules.human_seat) return "YOU";
+    if (s_seat_labels_on && s_seat_labels[seat][0]) return s_seat_labels[seat];
     // Number the CPUs 1..k in seat order, skipping the human seat.
     int n = 0;
     for (int s = 0; s <= seat; s++) {
@@ -222,6 +280,7 @@ void render_init(void) {
 #endif
     SetExitKey(KEY_NULL); // Escape is handled by the game, not the window
     SetTargetFPS(60);
+    gfx_font_init();      // load the bundled UI font now that the GL context exists
 
 #ifdef OR_LANDSCAPE
     canvas = LoadRenderTexture(BASE_WIDTH, BASE_HEIGHT);

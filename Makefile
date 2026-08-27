@@ -19,7 +19,7 @@ SRC := src/main.c src/rules.c src/game.c src/ai.c src/tick.c src/input.c \
        src/safe_area.c \
        src/sound.c src/audio_raylib.c \
        src/netgame.c src/net_ws.c src/net_posix.c src/net_stub.c src/net_web.c \
-       src/net_win.c \
+       src/net_win.c src/prefs.c \
        src/recorder.c src/encode_h264.c src/encode_mux.c
 
 # Shared standard/warning flags and vendored-header include paths.
@@ -444,7 +444,7 @@ IOS_TEAM_ID       ?=
 IOS_C_SRC      := src/rules.c src/game.c src/ai.c src/tick.c src/main.c \
                   src/render.c src/render_portrait.c src/render_landscape.c \
                   src/input.c src/sound.c src/recorder.c src/safe_area.c \
-                  src/netgame.c
+                  src/netgame.c src/prefs.c
 IOS_MM_SRC     := ios/ios_main.mm ios/gfx_metal.mm ios/plat_ios.mm ios/audio_ios.mm
 # The online client (net_apple.mm, Network.framework) is Obj-C++ compiled
 # WITHOUT ARC (it hand-retains nw_/dispatch objects held in a C struct), so it
@@ -617,15 +617,17 @@ $(AI_BENCH_BIN): tests/ai_bench.c $(wildcard src/*.c src/*.h) | $(OBJ_DIR)
 # Deterministic screenshots of every screen in both renderers (needs a
 # display). -DPLATFORM_WEB compiles both renderers into one native binary
 # (OR_RUNTIME_RENDERER); vis_shots.c supplies main(), so the emscripten loop
-# in main.c never enters the build.
+# in main.c never enters the build. The web net backend (net_web.c) needs the
+# emscripten SDK, so it is excluded and the no-op net_stub (via -DOR_NET_STUB)
+# satisfies netgame's link references — this harness never goes online.
 SHOTS_BIN := build/vis_shots
-SHOTS_SRC := $(filter-out src/main.c,$(SRC))
+SHOTS_SRC := $(filter-out src/main.c src/net_web.c,$(SRC))
 
 shots: $(SHOTS_BIN)
 	./$(SHOTS_BIN)
 
 $(SHOTS_BIN): tests/vis_shots.c $(wildcard src/*.c src/*.h) | $(OBJ_DIR)
-	gcc $(CFLAGS_COMMON) -O2 -DPLATFORM_WEB -I$(RAYLIB)/include \
+	gcc $(CFLAGS_COMMON) -O2 -DPLATFORM_WEB -DOR_NET_STUB -I$(RAYLIB)/include \
 	    tests/vis_shots.c $(SHOTS_SRC) -o $(SHOTS_BIN) $(LDFLAGS)
 
 # ---------------------------------------------------------------------------

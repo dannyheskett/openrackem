@@ -21,9 +21,17 @@ void gfx_begin_frame(void);
 void gfx_end_frame(void);
 void gfx_clear(Color color);
 
+// Load the bundled UI font. Must be called once after the window / GL context
+// exists (the backends also lazy-load on first text draw as a fallback).
+void gfx_font_init(void);
+
 void gfx_rect(int x, int y, int w, int h, Color color);
 void gfx_rect_lines(int x, int y, int w, int h, Color color);
 void gfx_line(int x1, int y1, int x2, int y2, Color color);
+
+// Card-art primitives. radius is in pixels (clamped to half the shorter side).
+void gfx_rect_rounded(int x, int y, int w, int h, int radius, Color color);
+void gfx_rect_gradient_v(int x, int y, int w, int h, Color top, Color bottom);
 
 void gfx_text(const char* text, int x, int y, int font_size, Color color);
 int  gfx_measure_text(const char* text, int font_size);

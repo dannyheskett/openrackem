@@ -212,33 +212,48 @@ static void send_json(NetGame* ng, const char* json) {
 }
 
 static void send_join_intent(NetGame* ng) {
-    char buf[128];
+    char buf[160];
     switch (ng->join) {
     case NG_JOIN_QUICK:
-        send_json(ng, "{\"t\":\"quick\"}");
+        snprintf(buf, sizeof buf, "{\"t\":\"quick\",\"name\":\"%s\"}", ng->name);
+        send_json(ng, buf);
         break;
     case NG_JOIN_CREATE:
         snprintf(buf, sizeof buf,
                  "{\"t\":\"create\",\"players\":%d,\"bonus\":%d,\"partners\":%d,"
-                 "\"target\":%d}",
+                 "\"target\":%d,\"name\":\"%s\"}",
                  ng->rules.player_count, ng->rules.bonus_scoring ? 1 : 0,
-                 ng->rules.partners ? 1 : 0, ng->rules.target_score);
+                 ng->rules.partners ? 1 : 0, ng->rules.target_score, ng->name);
         send_json(ng, buf);
         break;
     case NG_JOIN_CODE:
-        snprintf(buf, sizeof buf, "{\"t\":\"join\",\"code\":\"%s\"}", ng->code);
+        snprintf(buf, sizeof buf, "{\"t\":\"join\",\"code\":\"%s\",\"name\":\"%s\"}",
+                 ng->code, ng->name);
         send_json(ng, buf);
         break;
     }
 }
 
 void netgame_start(NetGame* ng, const char* host, int port, bool tls,
-                   NgJoin join, const char* code, const Rules* rules) {
+                   NgJoin join, const char* code, const Rules* rules,
+                   const char* name) {
     memset(ng, 0, sizeof *ng);
     ng->state = NG_CONNECTING;
     ng->my_seat = -1;
     ng->join = join;
     snprintf(ng->code, sizeof ng->code, "%s", code ? code : "");
+    // Sanitize the name to alphanumerics (JSON-safe, matches the server's handle
+    // rules) so a hand-edited prefs file can't inject into the wire message.
+    {
+        int j = 0;
+        if (name) for (int i = 0; name[i] && j < (int)sizeof ng->name - 1; i++) {
+            char ch = name[i];
+            if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+                (ch >= '0' && ch <= '9'))
+                ng->name[j++] = ch;
+        }
+        ng->name[j] = '\0';
+    }
     ng->rules = rules ? *rules : rules_default();
     rules_normalize(&ng->rules);
     snprintf(ng->host, sizeof ng->host, "%s", host ? host : "127.0.0.1");
@@ -250,6 +265,24 @@ void netgame_start(NetGame* ng, const char* host, int port, bool tls,
     if (!ng->conn) {
         ng->state = NG_ERROR;
         snprintf(ng->err, sizeof ng->err, "no connection");
+    }
+}
+
+// Parse a "handles":["A","B",...] array into ng->handles. Sent in the welcome
+// and in every state broadcast, so opponent names stay current as players join.
+static void parse_handles(NetGame* ng, const char* msg) {
+    const char* h = find_key(msg, "handles");
+    if (!h) return;
+    h += strlen("handles") + 3;
+    for (int i = 0; i < MAX_PLAYERS && *h && *h != ']'; ) {
+        while (*h && *h != '"' && *h != ']') h++;
+        if (*h != '"') break;
+        h++;
+        size_t k = 0;
+        while (*h && *h != '"' && k + 1 < sizeof ng->handles[i]) ng->handles[i][k++] = *h++;
+        ng->handles[i][k] = '\0';
+        if (*h == '"') h++;
+        i++;
     }
 }
 
@@ -334,21 +367,7 @@ unsigned netgame_update(NetGame* ng) {
             js_str(msg, "code", ng->code, sizeof ng->code);
             js_str(msg, "token", ng->token, sizeof ng->token);
             ng->players = (int)js_int(msg, "players", 4);
-            // Parse the handle list ("handles":["North",...]).
-            const char* h = find_key(msg, "handles");
-            if (h) {
-                h += strlen("handles") + 3;
-                for (int i = 0; i < MAX_PLAYERS && *h && *h != ']'; ) {
-                    while (*h && *h != '"' && *h != ']') h++;
-                    if (*h != '"') break;
-                    h++;
-                    size_t k = 0;
-                    while (*h && *h != '"' && k + 1 < sizeof ng->handles[i]) ng->handles[i][k++] = *h++;
-                    ng->handles[i][k] = '\0';
-                    if (*h == '"') h++;
-                    i++;
-                }
-            }
+            parse_handles(ng, msg);
             ng->state = js_int(msg, "waiting", 0) ? NG_WAITING : NG_PLAYING;
         } else if (strcmp(type, "room") == 0) {
             js_str(msg, "code", ng->code, sizeof ng->code);
@@ -360,6 +379,7 @@ unsigned netgame_update(NetGame* ng) {
             ng->state = NG_QUEUED;
         } else if (strcmp(type, "state") == 0) {
             if (netgame_parse_state(ng, msg, (size_t)n)) {
+                parse_handles(ng, msg);   // keep opponent names current
                 ng->state = NG_PLAYING;
                 ng->confirmed_local = false;
                 ng->pending = false;   // the authoritative result landed

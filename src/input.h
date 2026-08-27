@@ -2,6 +2,7 @@
 #define OPENRACKEM_INPUT_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 // One normalized input snapshot per frame. Keyboard and touch both fill this
 // struct, and both ultimately produce the same Action values, so the engine
@@ -36,6 +37,14 @@ typedef struct {
 
     // Window
     bool fullscreen_toggle;     // Alt+Enter
+
+    // Text entry (keyboard platforms only): printable characters typed this
+    // frame and a backspace edge (with key-repeat). Screens that accept typing
+    // — the name field, the room-code field — consume these; touch leaves them
+    // empty and uses the on-screen slot picker instead.
+    char    text_input[8];      // NUL-terminated chars entered this frame
+    uint8_t text_len;
+    bool    backspace_pressed;
 } Input;
 
 Input input_poll(void);

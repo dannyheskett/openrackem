@@ -2,9 +2,11 @@
 // game code calls (declared in ob_types.h), backed by state the UIKit view
 // pushes in (ios_main.mm). No raylib.
 #import <QuartzCore/QuartzCore.h> // CACurrentMediaTime
+#import <Foundation/Foundation.h> // NSSearchPathForDirectoriesInDomains (prefs path)
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "ob_types.h"
 #include "plat_ios.h"
@@ -60,4 +62,15 @@ const char* TextFormat(const char* text, ...) {
     vsnprintf(cur, LEN, text, args);
     va_end(args);
     return cur;
+}
+
+// The app's Documents directory, for prefs.c's persistent storage (C linkage).
+extern "C" const char* plat_ios_prefs_path(void) {
+    static char buf[1024];
+    NSArray<NSString*>* paths =
+        NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    if (paths.count == 0) return "";
+    strncpy(buf, paths.firstObject.UTF8String, sizeof buf - 1);
+    buf[sizeof buf - 1] = '\0';
+    return buf;
 }
