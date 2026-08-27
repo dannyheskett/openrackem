@@ -107,6 +107,8 @@ static int t_write(NetConn* c, const void* buf, size_t len) {
         if (n > 0) return n;
         int e = SSL_get_error(c->ssl, n);
         if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) return T_AGAIN;
+        if (getenv("OR_NET_DIAG"))
+            fprintf(stderr, "[net_posix] fail@ssl_write sslerr=%d errno=%d\n", e, errno);
         return T_ERR;
     }
 #endif
@@ -125,6 +127,8 @@ static int t_read(NetConn* c, void* buf, size_t len) {
         int e = SSL_get_error(c->ssl, n);
         if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) return T_AGAIN;
         if (e == SSL_ERROR_ZERO_RETURN) return 0;   // clean TLS close_notify
+        if (getenv("OR_NET_DIAG"))
+            fprintf(stderr, "[net_posix] fail@ssl_read sslerr=%d errno=%d\n", e, errno);
         return T_ERR;
     }
 #endif
@@ -142,10 +146,21 @@ static int tls_step(NetConn* c) {
     if (r == 1) return 1;
     int e = SSL_get_error(c->ssl, r);
     if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) return 0;
+    if (getenv("OR_NET_DIAG"))
+        fprintf(stderr, "[net_posix] fail@ssl_connect sslerr=%d errno=%d err=%lu\n",
+                e, errno, (unsigned long)ERR_peek_last_error());
     return -1;
 #else
     (void)c; return -1;
 #endif
+}
+
+// Startup failure tracing. Set OR_NET_DIAG=1 to print exactly which step failed
+// (and errno) to stderr; a no-op otherwise. Used to root-cause connect failures.
+static void diag(const char* where, int e) {
+    if (getenv("OR_NET_DIAG"))
+        fprintf(stderr, "[net_posix] fail@%s errno=%d (%s)\n",
+                where, e, e ? strerror(e) : "-");
 }
 
 NetConn* net_connect(const char* host, int port, const char* path, bool tls) {
@@ -168,19 +183,23 @@ NetConn* net_connect(const char* host, int port, const char* path, bool tls) {
     struct addrinfo hints = {0}, *res = NULL;
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
-    if (getaddrinfo(host, portstr, &hints, &res) != 0 || !res) {
+    int grc = getaddrinfo(host, portstr, &hints, &res);
+    if (grc != 0 || !res) {
+        if (getenv("OR_NET_DIAG"))
+            fprintf(stderr, "[net_posix] fail@getaddrinfo rc=%d (%s) host=%s\n",
+                    grc, gai_strerror(grc), host ? host : "(null)");
         c->status = NET_ERROR;
         return c;
     }
     int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (fd < 0) { freeaddrinfo(res); c->status = NET_ERROR; return c; }
+    if (fd < 0) { diag("socket", errno); freeaddrinfo(res); c->status = NET_ERROR; return c; }
     int fl = fcntl(fd, F_GETFL, 0);
     fcntl(fd, F_SETFL, fl | O_NONBLOCK);
     int one = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
     int rc = connect(fd, res->ai_addr, res->ai_addrlen);
     freeaddrinfo(res);
-    if (rc != 0 && errno != EINPROGRESS) { close(fd); c->status = NET_ERROR; return c; }
+    if (rc != 0 && errno != EINPROGRESS) { diag("connect", errno); close(fd); c->status = NET_ERROR; return c; }
     c->fd = fd;
 
 #ifdef OR_TLS
@@ -251,9 +270,9 @@ static void try_read(NetConn* c) {
         // would instead drop a buffer full of perfectly valid frames.
         if (c->in_len == NET_IN_CAP) break;
         int n = t_read(c, c->in + c->in_len, NET_IN_CAP - c->in_len);
-        if (n == 0) { c->status = NET_CLOSED; return; }
+        if (n == 0) { diag("read_eof", 0); c->status = NET_CLOSED; return; }
         if (n == T_AGAIN) break;
-        if (n < 0) { c->status = NET_ERROR; return; }
+        if (n < 0) { c->status = NET_ERROR; return; }   // t_read already traced
         c->in_len += (size_t)n;
     }
 
@@ -262,10 +281,10 @@ static void try_read(NetConn* c) {
         if (consumed == 0) {
             // A full buffer with no header terminator can't make progress —
             // treat it as a bad handshake rather than stalling forever.
-            if (c->in_len == NET_IN_CAP) c->status = NET_ERROR;
+            if (c->in_len == NET_IN_CAP) { diag("handshake_nohdr", 0); c->status = NET_ERROR; }
             return;
         }
-        if (consumed < 0) { c->status = NET_ERROR; return; }   // not a 101 upgrade
+        if (consumed < 0) { diag("handshake_not101", 0); c->status = NET_ERROR; return; }
         memmove(c->in, c->in + consumed, c->in_len - (size_t)consumed);
         c->in_len -= (size_t)consumed;
         c->handshaking = false;
@@ -298,10 +317,10 @@ void net_poll(NetConn* c) {
     if (c->tls && !c->tls_done) {
         int err = 0; socklen_t sl = sizeof err;
         if (getsockopt(c->fd, SOL_SOCKET, SO_ERROR, &err, &sl) != 0 || err != 0) {
-            if (err != 0) { c->status = NET_ERROR; return; }
+            if (err != 0) { diag("so_error_tls", err); c->status = NET_ERROR; return; }
         }
         int h = tls_step(c);
-        if (h < 0) { c->status = NET_ERROR; return; }
+        if (h < 0) { c->status = NET_ERROR; return; }   // tls_step already traced
         if (h == 0) return;   // still negotiating
         c->tls_done = true;
     }
@@ -311,7 +330,7 @@ void net_poll(NetConn* c) {
         if (!c->tls && c->req_sent == 0) {
             int err = 0; socklen_t sl = sizeof err;
             if (getsockopt(c->fd, SOL_SOCKET, SO_ERROR, &err, &sl) != 0 || err != 0) {
-                if (err != 0) { c->status = NET_ERROR; return; }
+                if (err != 0) { diag("so_error_plain", err); c->status = NET_ERROR; return; }
             }
         }
         size_t total = strlen(c->req);
@@ -319,7 +338,7 @@ void net_poll(NetConn* c) {
             int n = t_write(c, c->req + c->req_sent, total - c->req_sent);
             if (n > 0) c->req_sent += (size_t)n;
             else if (n == T_AGAIN) break;
-            else { c->status = NET_ERROR; break; }
+            else { diag("req_write", errno); c->status = NET_ERROR; break; }
         }
     }
 

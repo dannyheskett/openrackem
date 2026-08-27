@@ -212,10 +212,27 @@ jobs:
           emulator-options: -no-window -no-snapshot -noaudio -no-boot-anim -gpu swiftshader_indirect
           disable-animations: true
           script: |
+            set -x
+            adb wait-for-device
+            # Wait for the emulator's network + DNS to actually be up before
+            # testing — a just-booted AVD often has no route/resolver yet.
+            for i in $(seq 1 30); do
+              if adb shell 'ping -c1 -W2 openrackem-server.fly.dev >/dev/null 2>&1 && echo up' | grep -q up; then
+                echo "network ready after ${i} tries"; break; fi
+              sleep 2
+            done
+            adb shell 'ping -c2 -W3 openrackem-server.fly.dev' || echo "PING STILL FAILING"
             adb push build/net_live_android /data/local/tmp/net_live
             adb shell chmod 755 /data/local/tmp/net_live
-            adb shell /data/local/tmp/net_live | tee out.txt
-            grep -q "OK: live wss round-trip verified" out.txt
+            # Run 5x with diagnostics; FAIL the job on the first failure (this is a
+            # detector, not a retry) so any intermittent fault surfaces with its
+            # exact net_posix cause instead of being hidden.
+            for i in 1 2 3 4 5; do
+              echo "=== run $i ==="
+              adb shell "OR_NET_DIAG=1 /data/local/tmp/net_live" 2>&1 | tee out.txt
+              grep -q "OK: live wss round-trip verified" out.txt || { echo "RUN $i FAILED"; exit 1; }
+            done
+            echo "all 5 runs passed"
 
   ios:
     runs-on: macos-26
