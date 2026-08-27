@@ -211,11 +211,9 @@ jobs:
           force-avd-creation: false
           emulator-options: -no-window -no-snapshot -noaudio -no-boot-anim -gpu swiftshader_indirect
           disable-animations: true
-          script: |
-            adb push build/net_live_android /data/local/tmp/net_live
-            adb shell chmod 755 /data/local/tmp/net_live
-            adb shell /data/local/tmp/net_live | tee out.txt
-            grep -q "OK: live wss round-trip verified" out.txt
+          # emulator-runner executes `script` under /usr/bin/sh (dash); keep the
+          # logic in a bash script file to avoid dash quirks with loops.
+          script: bash scripts/android_net_test.sh
 
   ios:
     runs-on: macos-26
