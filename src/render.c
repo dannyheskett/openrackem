@@ -267,6 +267,11 @@ void render_init(void) {
     // Let the GL canvas follow the browser viewport (the HTML shell sizes it);
     // GetScreenWidth/Height then track it so the layout re-fits on resize/rotate.
     SetConfigFlags(FLAG_WINDOW_RESIZABLE);
+#else
+    // Desktop native: a freely resizable window (minimum 640x480, enforced
+    // below) whose 640x480 layout scales up to fill it at native resolution;
+    // MSAA keeps the scaled vector edges clean.
+    SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
 #endif
 #if defined(PLATFORM_ANDROID)
     // Request 0x0: raylib's Android backend then renders at the device's native
@@ -279,6 +284,9 @@ void render_init(void) {
     InitWindow(BASE_WIDTH, BASE_HEIGHT, "openrackem");
 #endif
     SetExitKey(KEY_NULL); // Escape is handled by the game, not the window
+#if !defined(PLATFORM_ANDROID) && !defined(PLATFORM_WEB)
+    SetWindowMinSize(BASE_WIDTH, BASE_HEIGHT); // never render below 640x480
+#endif
     SetTargetFPS(60);
     gfx_font_init();      // load the bundled UI font now that the GL context exists
 

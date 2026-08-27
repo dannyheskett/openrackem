@@ -621,7 +621,9 @@ $(AI_BENCH_BIN): tests/ai_bench.c $(wildcard src/*.c src/*.h) | $(OBJ_DIR)
 # emscripten SDK, so it is excluded and the no-op net_stub (via -DOR_NET_STUB)
 # satisfies netgame's link references — this harness never goes online.
 SHOTS_BIN := build/vis_shots
-SHOTS_SRC := $(filter-out src/main.c src/net_web.c,$(SRC))
+# net_web.c + prefs.c take emscripten-only code paths under -DPLATFORM_WEB; the
+# harness needs neither (it drives the renderers directly, never main.c).
+SHOTS_SRC := $(filter-out src/main.c src/net_web.c src/prefs.c,$(SRC))
 
 shots: $(SHOTS_BIN)
 	./$(SHOTS_BIN)
