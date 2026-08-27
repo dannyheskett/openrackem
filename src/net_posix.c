@@ -219,6 +219,12 @@ NetConn* net_connect(const char* host, int port, const char* path, bool tls) {
                 X509_free(x);
             }
             if (bio) BIO_free(bio);
+            // The loop above ends when PEM_read_bio_X509 hits EOF, which pushes
+            // PEM_R_NO_START_LINE onto the thread's OpenSSL error queue. That stale
+            // entry must be cleared: SSL_get_error() consults the queue, so a later
+            // would-block SSL_read would otherwise be misreported as a fatal
+            // SSL_ERROR_SSL and drop the connection.
+            ERR_clear_error();
         }
 #else
         SSL_CTX_set_default_verify_paths(c->ctx);           // system CA store
