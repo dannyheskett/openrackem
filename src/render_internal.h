@@ -66,6 +66,21 @@ typedef struct {
 void draw_menu_panel(MenuLayout m, const char* title, const char* const* items,
                      int count, int selected, int gap_before, bool capture);
 
+// Computed slot-picker geometry + its shared drawer (defined in render.c),
+// filled by each renderer the same way MenuLayout is. `capture` records the
+// slot and button rectangles for touch; landscape passes false.
+typedef struct {
+    int cx, px, py, panel_w, panel_h;
+    int title_size, title_y;
+    int slots_y, slot_w, slot_h, slot_gap, slot_fs;
+    int band_h;                  // the spinner bands above and below the slots
+    int hint_y, hint_fs;
+    int btn_y, btn_w, btn_h, btn_fs;
+} PickerLayout;
+void draw_picker_panel(PickerLayout p, const char* title, const char* slots,
+                       int cursor, const char* alphabet, const char* hint,
+                       const char* ok_label, bool capture);
+
 // Per-renderer entry points (defined in render_portrait/landscape.c), called by
 // the OR_DISPATCH macro in render.c.
 #ifdef OR_PORTRAIT
@@ -73,6 +88,9 @@ void render_frame_portrait(const Game* game, const TableUi* ui);
 void render_pause_portrait(const Game* game, const TableUi* ui);
 void render_menu_portrait(const char* title, const char* const* items, int count,
                           int selected, int gap_before);
+void render_picker_portrait(const char* title, const char* slots, int cursor,
+                            const char* alphabet, const char* hint,
+                            const char* ok_label);
 #endif
 #ifdef OR_LANDSCAPE
 extern RenderTexture2D canvas; // created in render_init, blitted by present()
@@ -80,6 +98,9 @@ void render_frame_landscape(const Game* game, const TableUi* ui);
 void render_pause_landscape(const Game* game, const TableUi* ui);
 void render_menu_landscape(const char* title, const char* const* items, int count,
                            int selected, int gap_before);
+void render_picker_landscape(const char* title, const char* slots, int cursor,
+                             const char* alphabet, const char* hint,
+                             const char* ok_label);
 #endif
 
 #endif // OPENRACKEM_RENDER_INTERNAL_H

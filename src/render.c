@@ -3,6 +3,7 @@
 // renderers live in render_portrait.c and render_landscape.c.
 #include "render_internal.h"
 #include <stdio.h>
+#include <string.h>
 #if !defined(PLATFORM_IOS)
 #include <raylib.h>  // window/timing (InitWindow, …); absent on iOS
 #endif
@@ -258,6 +259,137 @@ void draw_menu_panel(MenuLayout m, const char* title, const char* const* items,
     }
 }
 
+// --- Slot picker -----------------------------------------------------------
+// Tap targets captured by the last render_picker: one per slot, plus the two
+// spinner bands and the two buttons.
+static Rectangle s_pick_rects[PICKER_MAX_SLOTS + 4];
+static int       s_pick_ids[PICKER_MAX_SLOTS + 4];
+static int       s_pick_count = 0;
+
+static void pick_capture(int id, Rectangle r) {
+    if (s_pick_count >= (int)(sizeof s_pick_ids / sizeof s_pick_ids[0])) return;
+    s_pick_ids[s_pick_count]   = id;
+    s_pick_rects[s_pick_count] = r;
+    s_pick_count++;
+}
+
+int render_picker_hit_test(Vector2 p) {
+    // Reverse order: the buttons and bands are captured last and must win over
+    // the slot row they may be padded into.
+    for (int i = s_pick_count - 1; i >= 0; i--) {
+        if (CheckCollisionPointRec(p, s_pick_rects[i])) return s_pick_ids[i];
+    }
+    return PICK_NONE;
+}
+
+// The character `steps` along the alphabet ring from `ch` (wrapping). Unknown
+// characters read as the ring's first entry, which is how an empty slot (space,
+// for a name) lands on the letter after it.
+static char alpha_step(const char* alphabet, char ch, int steps) {
+    int n = (int)strlen(alphabet);
+    if (n <= 0) return ch;
+    const char* pos = strchr(alphabet, ch);
+    int idx = pos ? (int)(pos - alphabet) : 0;
+    idx = ((idx + steps) % n + n) % n;
+    return alphabet[idx];
+}
+
+// A blank name slot is a space; show it as an underscore so the slot still
+// reads as a slot.
+static char slot_glyph(char c) { return (c == ' ') ? '_' : c; }
+
+static void draw_slot_char(char c, int cx, int y, int fs, Color col) {
+    char t[2] = { slot_glyph(c), '\0' };
+    gfx_text(t, cx - gfx_measure_text(t, fs) / 2, y, fs, col);
+}
+
+static void draw_picker_button(int x, int y, int w, int h, int fs,
+                               const char* label, Color edge) {
+    gfx_rect_rounded(x, y, w, h, h / 4, (Color){28, 28, 42, 255});
+    gfx_rect_lines(x, y, w, h, edge);
+    gfx_text(label, x + (w - gfx_measure_text(label, fs)) / 2, y + (h - fs) / 2,
+             fs, edge);
+}
+
+void draw_picker_panel(PickerLayout L, const char* title, const char* slots,
+                       int cursor, const char* alphabet, const char* hint,
+                       const char* ok_label, bool capture) {
+    int n = (int)strlen(slots);
+    if (n > PICKER_MAX_SLOTS) n = PICKER_MAX_SLOTS;
+    if (n < 1) return;
+    if (cursor < 0) cursor = 0;
+    if (cursor >= n) cursor = n - 1;
+    if (capture) s_pick_count = 0;
+
+    gfx_rect(L.px, L.py, L.panel_w, L.panel_h, (Color){15, 15, 25, 255});
+    gfx_rect_lines(L.px, L.py, L.panel_w, L.panel_h, LIGHTGRAY);
+
+    int ts = L.title_size;
+    while (ts > 10 && gfx_measure_text(title, ts) > L.panel_w - 24) ts -= 2;
+    gfx_text(title, L.cx - gfx_measure_text(title, ts) / 2,
+             L.title_y + (L.title_size - ts) / 2, ts, WHITE);
+
+    int total = n * L.slot_w + (n - 1) * L.slot_gap;
+    int sx = L.cx - total / 2;
+    int cur_x = sx + cursor * (L.slot_w + L.slot_gap);
+
+    // Spinner bands. The letters either side of the active slot are drawn above
+    // and below it on tinted strips, so tapping "the letter above" is the
+    // obvious way to advance — the swipe these replace was invisible and
+    // unguessable. The strip spans the whole slot row because that is exactly
+    // the rectangle captured below: what you see is what you can hit.
+    int band_fs = L.slot_fs * 4 / 5;
+    int up_y    = L.slots_y - L.band_h;
+    int down_y  = L.slots_y + L.slot_h;
+    Color band_bg = (Color){30, 30, 46, 255};
+    gfx_rect_rounded(sx, up_y,   total, L.band_h, L.band_h / 4, band_bg);
+    gfx_rect_rounded(sx, down_y, total, L.band_h, L.band_h / 4, band_bg);
+    draw_slot_char(alpha_step(alphabet, slots[cursor],  1), cur_x + L.slot_w / 2,
+                   up_y + (L.band_h - band_fs) / 2, band_fs, SLOT_LABEL);
+    draw_slot_char(alpha_step(alphabet, slots[cursor], -1), cur_x + L.slot_w / 2,
+                   down_y + (L.band_h - band_fs) / 2, band_fs, SLOT_LABEL);
+
+    for (int i = 0; i < n; i++) {
+        int x = sx + i * (L.slot_w + L.slot_gap);
+        bool active = (i == cursor);
+        gfx_rect_rounded(x, L.slots_y, L.slot_w, L.slot_h, L.slot_w / 6,
+                         active ? (Color){40, 40, 60, 255} : (Color){24, 24, 34, 255});
+        gfx_rect_lines(x, L.slots_y, L.slot_w, L.slot_h, active ? ACCENT : CARD_EDGE);
+        draw_slot_char(slots[i], x + L.slot_w / 2,
+                       L.slots_y + (L.slot_h - L.slot_fs) / 2, L.slot_fs,
+                       active ? ACCENT : WHITE);
+        if (capture) {
+            // Pad the target to the gap either side: a fingertip is wider than
+            // a slot when twelve of them share a phone's width.
+            pick_capture(i, (Rectangle){(float)(x - L.slot_gap / 2), (float)L.slots_y,
+                                        (float)(L.slot_w + L.slot_gap), (float)L.slot_h});
+        }
+    }
+
+    if (hint) {
+        gfx_text(hint, L.cx - gfx_measure_text(hint, L.hint_fs) / 2, L.hint_y,
+                 L.hint_fs, GRAY);
+    }
+
+    int bx0 = L.cx - L.btn_w - L.btn_w / 8;
+    int bx1 = L.cx + L.btn_w / 8;
+    draw_picker_button(bx0, L.btn_y, L.btn_w, L.btn_h, L.btn_fs, ok_label, ACCENT);
+    draw_picker_button(bx1, L.btn_y, L.btn_w, L.btn_h, L.btn_fs, "CANCEL", GRAY);
+
+    if (capture) {
+        // Bands span the whole slot row's width so the target is a comfortable
+        // strip rather than one slot-wide column.
+        pick_capture(PICK_NEXT, (Rectangle){(float)sx, (float)up_y,
+                                            (float)total, (float)L.band_h});
+        pick_capture(PICK_PREV, (Rectangle){(float)sx, (float)down_y,
+                                            (float)total, (float)L.band_h});
+        pick_capture(PICK_OK,     (Rectangle){(float)bx0, (float)L.btn_y,
+                                              (float)L.btn_w, (float)L.btn_h});
+        pick_capture(PICK_CANCEL, (Rectangle){(float)bx1, (float)L.btn_y,
+                                              (float)L.btn_w, (float)L.btn_h});
+    }
+}
+
 // --- Lifecycle -------------------------------------------------------------
 void render_init(void) {
 #if defined(PLATFORM_IOS)
@@ -346,6 +478,10 @@ void render_pause(const Game* game, const TableUi* ui) { OR_DISPATCH(render_paus
 void render_menu(const char* title, const char* const* items, int count,
                  int selected, int gap_before) {
     OR_DISPATCH(render_menu, title, items, count, selected, gap_before);
+}
+void render_picker(const char* title, const char* slots, int cursor,
+                   const char* alphabet, const char* hint, const char* ok_label) {
+    OR_DISPATCH(render_picker, title, slots, cursor, alphabet, hint, ok_label);
 }
 
 int render_menu_hit_test(Vector2 p) {

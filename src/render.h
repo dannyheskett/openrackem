@@ -49,6 +49,21 @@ bool render_window_focused(void);
 // rectangles captured by the last render_menu() call (touch menus).
 int render_menu_hit_test(Vector2 p);
 
+// Slot picker: the player-name and room-code entry screens. `slots` is one
+// character per slot (NUL-terminated), `cursor` the slot being edited, and
+// `alphabet` the ring those slots cycle through — the picker draws the
+// neighbouring letters above and below the active slot as a spinner, so the
+// two bands are self-explanatory targets rather than an undiscoverable swipe.
+// `ok_label` names the confirm button ("SAVE", "JOIN").
+#define PICKER_MAX_SLOTS 12
+void render_picker(const char* title, const char* slots, int cursor,
+                   const char* alphabet, const char* hint, const char* ok_label);
+
+// What a tap landed on: a slot index (0..slots-1), one of the PICK_* controls,
+// or PICK_NONE. Uses the rectangles captured by the last render_picker().
+enum { PICK_NONE = -1, PICK_NEXT = 100, PICK_PREV = 101, PICK_OK = 102, PICK_CANCEL = 103 };
+int render_picker_hit_test(Vector2 p);
+
 // Table zones for touch hit-testing, captured by the last render_frame():
 // 0..9 are rack slots; HIT_STOCK / HIT_DISCARD are the piles.
 enum { HIT_NONE = -1, HIT_STOCK = 10, HIT_DISCARD = 11 };

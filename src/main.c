@@ -298,6 +298,38 @@ static bool server_tls(void) {
 // slot picker.
 static const char CODE_ALPHABET[] = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
+// Step one picker slot along its alphabet ring (+1 / -1, wrapping). Shared by
+// the room-code and name screens, which are the same widget over different
+// rings.
+static void slot_cycle(char* slot, const char* alphabet, int dir) {
+    int n = (int)strlen(alphabet);
+    const char* pos = strchr(alphabet, *slot);
+    int idx = pos ? (int)(pos - alphabet) : 0;
+    idx = ((idx + (dir > 0 ? 1 : -1)) % n + n) % n;
+    *slot = alphabet[idx];
+}
+
+// A tap on the slot picker, resolved against what the renderer drew. Returns 1
+// to confirm, -1 to cancel, 0 if the tap only moved the cursor or cycled a
+// slot (or missed everything).
+static int picker_tap(const Input* in, char* slots, int nslots, int* cursor,
+                      const char* alphabet) {
+    if (!in->touch_tap) return 0;
+    int hit = render_picker_hit_test((Vector2){in->tap_x, in->tap_y});
+    if (hit >= 0 && hit < nslots) {
+        *cursor = hit;
+        sound_play(SFX_MENU_MOVE);
+    } else if (hit == PICK_NEXT || hit == PICK_PREV) {
+        slot_cycle(&slots[*cursor], alphabet, (hit == PICK_NEXT) ? 1 : -1);
+        sound_play(SFX_MENU_MOVE);
+    } else if (hit == PICK_OK) {
+        return 1;
+    } else if (hit == PICK_CANCEL) {
+        return -1;
+    }
+    return 0;
+}
+
 // Drive the online submenu one frame (plain navigation). Returns the chosen
 // item (ONL_*) on select, or -1.
 static int online_menu(AppCtx* c, const Input* in) {
@@ -345,13 +377,11 @@ static int join_screen(AppCtx* c, const Input* in) {
     if (in->menu_left)  c->code_cursor = (c->code_cursor + 5) % 6;
     if (in->menu_right) c->code_cursor = (c->code_cursor + 1) % 6;
     if (in->menu_up || in->menu_down) {
-        const char* pos = strchr(CODE_ALPHABET, c->join_code[c->code_cursor]);
-        int idx = pos ? (int)(pos - CODE_ALPHABET) : 0;
-        int n = (int)(sizeof CODE_ALPHABET - 1);
-        idx = (idx + (in->menu_up ? 1 : n - 1)) % n;
-        c->join_code[c->code_cursor] = CODE_ALPHABET[idx];
+        slot_cycle(&c->join_code[c->code_cursor], CODE_ALPHABET, in->menu_up ? 1 : -1);
         sound_play(SFX_MENU_MOVE);
     }
+    int tap = picker_tap(in, c->join_code, 6, &c->code_cursor, CODE_ALPHABET);
+    if (tap != 0) return tap;
     if (in->confirm_pressed) return 1;
     return 0;
 }
@@ -383,8 +413,9 @@ static void name_edit_save(const AppCtx* c) {
 }
 
 // The Name screen: keyboard types alphanumerics into the slots (backspace
-// deletes); touch swipes move the slot (left/right) and cycle the letter
-// (up/down). Returns 1 to save+exit, -1 to cancel, 0 to stay.
+// deletes); touch taps a slot to select it, taps the spinner bands to cycle its
+// letter, and taps SAVE / CANCEL to leave (swipes still work). Returns 1 to
+// save+exit, -1 to cancel, 0 to stay.
 static int name_screen(AppCtx* c, const Input* in) {
     if (in->escape_pressed) return -1;
     for (int i = 0; i < in->text_len; i++) {
@@ -403,14 +434,15 @@ static int name_screen(AppCtx* c, const Input* in) {
     if (in->menu_left)  c->name_cursor = (c->name_cursor + NAME_MAX - 1) % NAME_MAX;
     if (in->menu_right) c->name_cursor = (c->name_cursor + 1) % NAME_MAX;
     if (in->menu_up || in->menu_down) {
-        const char* pos = strchr(NAME_ALPHABET, c->name_buf[c->name_cursor]);
-        int idx = pos ? (int)(pos - NAME_ALPHABET) : 0;
-        int n = (int)(sizeof NAME_ALPHABET - 1);
-        idx = (idx + (in->menu_up ? 1 : n - 1)) % n;
-        c->name_buf[c->name_cursor] = NAME_ALPHABET[idx];
+        slot_cycle(&c->name_buf[c->name_cursor], NAME_ALPHABET, in->menu_up ? 1 : -1);
         sound_play(SFX_MENU_MOVE);
     }
-    if (in->confirm_pressed || in->touch_tap) return 1;
+    // A bare tap used to mean "save and leave", which made the picker unusable
+    // on a phone: every attempt to reach another slot exited the screen. Taps
+    // now go to the widget, and only its SAVE button confirms.
+    int tap = picker_tap(in, c->name_buf, NAME_MAX, &c->name_cursor, NAME_ALPHABET);
+    if (tap != 0) return tap;
+    if (in->confirm_pressed) return 1;
     return 0;
 }
 
@@ -708,6 +740,9 @@ static void frame_step(void* arg) {
         int oc = online_menu(c, &in);
         if (oc == ONL_BACK) { c->state = STATE_MENU; c->selected = 0; break; }
         if (oc == ONL_JOIN) {
+            for (int i = 0; i < 6; i++) c->join_code[i] = 'A';
+            c->join_code[6] = '\0';
+            c->code_cursor = 0;
             c->state = STATE_ONLINE_JOIN;
             c->code_cursor = 0;
             sound_play(SFX_MENU_SELECT);
@@ -789,33 +824,15 @@ static void frame_step(void* arg) {
         int opt_count = build_options(opt_labels);
         render_menu("OPTIONS", opt_labels, opt_count, c->selected, OPT_BACK);
     } else if (c->state == STATE_NAME) {
-        // Show the name with the active slot bracketed, blanks as underscores.
-        char shown[40] = {0};
-        int p = 0;
-        for (int i = 0; i < NAME_MAX && p < 36; i++) {
-            char ch = (c->name_buf[i] == ' ') ? '_' : c->name_buf[i];
-            if (i == c->name_cursor) p += snprintf(shown + p, sizeof shown - p, "[%c]", ch);
-            else                     p += snprintf(shown + p, sizeof shown - p, "%c", ch);
-        }
-        const char* lines[] = { shown,
-                                "Type your name, or swipe to edit",
-                                "Enter / tap: save    Esc: cancel" };
-        render_menu("YOUR NAME", lines, 3, -1, -1);
+        render_picker("YOUR NAME", c->name_buf, c->name_cursor, NAME_ALPHABET,
+                      "TAP A SLOT, THEN THE LETTER ABOVE OR BELOW IT", "SAVE");
     } else if (c->state == STATE_PAUSED) {
         render_pause(c->game, &c->ui);
     } else if (c->state == STATE_ONLINE_MENU || c->state == STATE_ONLINE) {
         render_online(c);
     } else if (c->state == STATE_ONLINE_JOIN) {
-        // Show the code with the active slot bracketed, e.g. "A B [C] D E F".
-        char shown[24] = {0};
-        int p = 0;
-        for (int i = 0; i < 6 && p < 20; i++) {
-            char ch = c->join_code[i] ? c->join_code[i] : 'A';
-            if (i == c->code_cursor) p += snprintf(shown + p, sizeof shown - p, "[%c]", ch);
-            else p += snprintf(shown + p, sizeof shown - p, " %c ", ch);
-        }
-        const char* lines[] = { shown, "Up/Down: letter   Left/Right: slot", "Enter: join" };
-        render_menu("JOIN BY CODE", lines, 3, -1, -1);
+        render_picker("JOIN BY CODE", c->join_code, c->code_cursor, CODE_ALPHABET,
+                      "TAP A SLOT, THEN THE LETTER ABOVE OR BELOW IT", "JOIN");
     } else {
         render_frame(c->game, &c->ui);
     }
