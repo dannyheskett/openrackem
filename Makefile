@@ -628,6 +628,27 @@ SHOTS_SRC := $(filter-out src/main.c src/net_web.c src/prefs.c,$(SRC))
 shots: $(SHOTS_BIN)
 	./$(SHOTS_BIN)
 
+# Store screenshots. The Play set is 540x960 (upscaled by gen_store_assets.py);
+# the App Store set is native 1290x2796 (iPhone 6.9", the only size Apple now
+# requires) written straight into ios/app-store-assets/. Same source list and
+# flags as `shots`: gen_store_shots.c supplies its own main().
+STORE_SHOTS_BIN := build/store_shots
+IOS_SHOT_DIR    := ios/app-store-assets/screenshots/iphone-6.9
+
+$(STORE_SHOTS_BIN): scripts/gen_store_shots.c $(wildcard src/*.c src/*.h) | $(OBJ_DIR)
+	gcc $(CFLAGS_COMMON) -O2 -DPLATFORM_WEB -DOR_NET_STUB -I$(RAYLIB)/include \
+	    scripts/gen_store_shots.c $(SHOTS_SRC) -o $(STORE_SHOTS_BIN) $(LDFLAGS)
+
+store-shots: $(STORE_SHOTS_BIN)
+	./$(STORE_SHOTS_BIN)
+
+store-shots-ios: $(STORE_SHOTS_BIN)
+	mkdir -p $(IOS_SHOT_DIR)
+	xvfb-run -a -s "-screen 0 1400x2900x24" ./$(STORE_SHOTS_BIN) 1290 2796 $(IOS_SHOT_DIR)
+	@# The App Store rejects screenshots carrying an alpha channel.
+	python3 -c "import glob;from PIL import Image;[Image.open(f).convert('RGB').save(f) for f in glob.glob('$(IOS_SHOT_DIR)/*.png')]"
+	@echo "[ios] store shots -> $(IOS_SHOT_DIR)" 
+
 $(SHOTS_BIN): tests/vis_shots.c $(wildcard src/*.c src/*.h) | $(OBJ_DIR)
 	gcc $(CFLAGS_COMMON) -O2 -DPLATFORM_WEB -DOR_NET_STUB -I$(RAYLIB)/include \
 	    tests/vis_shots.c $(SHOTS_SRC) -o $(SHOTS_BIN) $(LDFLAGS)
@@ -805,6 +826,6 @@ clean:
 # Pull in auto-generated header dependencies (ignored if not yet present).
 -include $(OBJ:.o=.d) $(REL_OBJ:.o=.d) $(WIN64_OBJ:.o=.d) $(WIN32_OBJ:.o=.d) $(MAC_OBJ:.o=.d)
 
-.PHONY: all run release run-release windows mac web web-serve test ai-bench shots server server-run net-e2e net-multi net-live mac-net-test win-net-build win-net-test android-net-build clean \
+.PHONY: all run release run-release windows mac web web-serve test ai-bench shots store-shots store-shots-ios server server-run net-e2e net-multi net-live mac-net-test win-net-build win-net-test android-net-build clean \
         android android-play ios ios-sim \
         dist dist-linux dist-windows dist-mac dist-web dist-android dist-android-play dist-ios

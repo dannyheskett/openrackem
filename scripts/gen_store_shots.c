@@ -16,17 +16,26 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <stdlib.h>
+// Optional argv: WIDTH HEIGHT OUTDIR. Defaults reproduce the Play set exactly
+// (540x960 -> build/store-shots). The App Store wants 1290x2796 native:
+//   xvfb-run -s "-screen 0 1400x2900x24" ./build/store_shots 1290 2796 \
+//       ios/app-store-assets/screenshots/iphone-6.9
+static int SHOT_W = 540, SHOT_H = 960;
+static const char* SHOT_DIR = "build/store-shots";
 static void skip_deal(Game* g){ for(int i=0;i<4096&&g->phase==PHASE_DEAL;i++) game_update(g);}
 static void drain(Game* g){ while(g->anim.frames>0) game_update(g);}
 static void snap(const char* name, const Game* g, const TableUi* ui){
     for(int i=0;i<3;i++) render_frame(g,ui);
-    char p[128]; snprintf(p,sizeof p,"build/store-shots/%s.png",name);
+    char p[256]; snprintf(p,sizeof p,"%s/%s.png",SHOT_DIR,name);
     TakeScreenshot(p);
 }
-int main(void){
-    mkdir("build",0755); mkdir("build/store-shots",0755);
+int main(int argc, char** argv){
+    if(argc >= 3){ SHOT_W = atoi(argv[1]); SHOT_H = atoi(argv[2]); }
+    if(argc >= 4){ SHOT_DIR = argv[3]; }
+    mkdir("build",0755); mkdir(SHOT_DIR,0755);
     render_init();
-    SetWindowSize(540, 960);
+    SetWindowSize(SHOT_W, SHOT_H);
     render_set_portrait(true);
     Rules r = rules_default(); r.player_count=4; r.human_seat=0; r.seed=20260825;
     rules_normalize(&r);
@@ -58,7 +67,7 @@ int main(void){
     // 01: the menu.
     static const char* items[] = {"New Game","Options","Sound: Off","Exit"};
     for(int i=0;i<3;i++) render_menu("OPENRACKEM", items, 4, 0, 3);
-    TakeScreenshot("build/store-shots/01-menu.png");
+    char mp[256]; snprintf(mp,sizeof mp,"%s/01-menu.png",SHOT_DIR); TakeScreenshot(mp);
     render_cleanup();
     printf("store shots written\n");
     return 0;

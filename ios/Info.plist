@@ -26,8 +26,13 @@
          runs on the iPhone 6s and later, so this costs no realistic users. -->
     <key>MinimumOSVersion</key>
     <string>15.0</string>
-    <!-- Openrackem uses no encryption. Declaring this stops App Store Connect
-         asking the export-compliance question on every single upload. -->
+    <!-- The online client connects over wss:// (src/net_apple.mm), so the app
+         DOES use encryption, but only the TLS the OS provides, for standard
+         secure comms, which is exempt. This key asks about NON-exempt
+         encryption, so false is the correct answer, and declaring it stops App
+         Store Connect asking the export-compliance question on every upload.
+         (No crypto ships in the iOS binary: Network.framework terminates TLS,
+         and the bundled OpenSSL is an Android-only dependency.) -->
     <key>ITSAppUsesNonExemptEncryption</key>
     <false/>
     <key>UILaunchScreen</key>
@@ -40,5 +45,9 @@
     <array>
         <integer>1</integer>
     </array>
+    <!-- Not the whole story: the device build injects CFBundleSupportedPlatforms,
+         DTPlatformName, UIRequiredDeviceCapabilities (arm64) and the toolchain
+         DT* keys, and merges actool's CFBundleIcons/CFBundleIconName. See the
+         $(IOS_IPA) rule in the Makefile. -->
 </dict>
 </plist>
