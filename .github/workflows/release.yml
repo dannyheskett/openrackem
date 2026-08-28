@@ -544,3 +544,47 @@ jobs:
         run: |
           python3 -m pip install --quiet cryptography
           python3 scripts/testflight_notes.py
+
+  # ---------------------------------------------------------------------------
+  # Deploy the multiplayer daemon (src-server/) to Fly.io on every release, so
+  # the running server never drifts from the released client. Gated on the
+  # FLY_API_TOKEN secret and skipped on a dry run. A loopback 2/3/4-player match
+  # gates the deploy, so a broken daemon never ships. --ha=false keeps the
+  # single-machine invariant (see fly.toml); the rolling restart briefly drops
+  # in-flight games, which clients auto-rejoin via their seat token.
+  # ---------------------------------------------------------------------------
+  deploy-server:
+    name: deploy the multiplayer daemon to Fly.io
+    needs: [prepare, publish]
+    if: ${{ !inputs.dry_run && needs.publish.result == 'success' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+      - name: Gate on the FLY_API_TOKEN secret
+        id: gate
+        env:
+          TOK: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          if [ -n "$TOK" ]; then
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping server deploy (no FLY_API_TOKEN secret)."
+          fi
+      # Correctness gate: build the daemon and play full 2/3/4-player matches over
+      # loopback on the exact code about to ship. A failure fails the job and
+      # blocks the deploy — a broken daemon never reaches Fly.
+      - name: Verify the daemon (loopback 2/3/4-player matches)
+        if: steps.gate.outputs.go == 'true'
+        run: make net-multi
+      - name: Set up flyctl
+        if: steps.gate.outputs.go == 'true'
+        uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Deploy to Fly.io (single machine)
+        if: steps.gate.outputs.go == 'true'
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: flyctl deploy --ha=false --remote-only --config fly.toml
