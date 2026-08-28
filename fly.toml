@@ -1,5 +1,7 @@
-# openrackem multiplayer daemon — a dedicated fly.io app, deployed with
-# `fly deploy` from the repo root (the game's store builds are unrelated).
+# openrackem multiplayer daemon — a dedicated fly.io app. It is auto-deployed by
+# the `deploy-server` job in .github/workflows/release.yml on every release (a
+# loopback 2/3/4-player match gates the deploy). `fly deploy --ha=false` from the
+# repo root remains the manual fallback. The game's store builds are unrelated.
 #
 # TLS terminates at Fly's edge proxy; the daemon speaks plain WebSocket on the
 # internal port and trusts the Fly-Client-IP header for rate limiting.
