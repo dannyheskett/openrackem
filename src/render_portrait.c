@@ -89,95 +89,130 @@ static void draw_title_bar(void) {
     }
     // else: wide notch — leave the bar bare.
 }
-
 // --- Shared portrait table layout -------------------------------------------
 // Everything is derived from the live screen size each frame, so rotation and
 // resize (web) re-fit automatically.
+//
+// Two columns, but only one of them holds cards. The rack keeps its full ten
+// slots in a single descending strip, because that IS the game -- reading it
+// top to bottom is how you check whether it is in order, and folding it in
+// half broke that. Everything else -- opponents, the running score, the
+// instruction, and the three piles -- moves into a narrower column beside it,
+// which is what buys the strip its width back.
 typedef struct {
-    int m;                          // outer margin
-    int opp_y, opp_h, opp_fs, opp_row;  // opponents: one full-width row each
-    int stats_y, stats_fs;          // points / round / run, small
-    int status_y, status_fs;        // the instruction line under it, large
-    // The rack is two columns of five. `rack_x` is the left column's edge and
-    // `col_gap` the space to the right one; `label_fs` sizes the slot number,
-    // which now sits inside the card.
-    int rack_y, row, rows, card_w, card_h, rack_x, col_gap, label_fs;
-    int pile_y, pile_w, pile_h, pile_label_fs; // bottom band (3 pile spots)
+    int m;                              // outer margin
+    int side_x, side_w;                 // the mechanics column
+    int opp_y, opp_h, opp_fs, opp_row;  // opponents: one row each, in the side
+    int stats_y, stats_fs;              // points / round / run
+    int status_y, status_fs, status_lh; // the instruction, wrapped to the side
+    // The rack: one column of ten. `label_fs` sizes the slot number, which
+    // sits inside the card's top-left corner.
+    int rack_x, rack_y, row, card_w, card_h, label_fs;
+    int pile_x, pile_y, pile_w, pile_h, pile_step, pile_label_fs; // stacked
 } PortraitLayout;
 
-// Where slot `s` sits. Slots 9..5 fill the left column top to bottom (labels 50
-// down to 30) and slots 4..0 the right (25 down to 5): the same single
-// descending strip the rack has always been, folded once so five rows of tall
-// cards fit where ten rows of thin ones used to.
+// Where slot `s` sits: #50 at the top, #5 at the bottom, one column.
 static Rectangle slot_rect(const PortraitLayout* L, int s) {
-    int half = RACK_SLOTS / 2;
-    int col  = (s < half) ? 1 : 0;
-    int idx  = (col == 0) ? (RACK_SLOTS - 1 - s) : (half - 1 - s);
-    return (Rectangle){ (float)(L->rack_x + col * (L->card_w + L->col_gap)),
-                        (float)(L->rack_y + idx * L->row),
+    return (Rectangle){ (float)L->rack_x,
+                        (float)(L->rack_y + (RACK_SLOTS - 1 - s) * L->row),
                         (float)L->card_w, (float)L->card_h };
+}
+
+#define WRAP_MAX_LINES 4
+#define WRAP_MAX_CHARS 40
+
+// Greedy word wrap: break `text` on spaces into at most WRAP_MAX_LINES lines
+// that each measure under `width` at `fs`. The side column is narrow and the
+// longest instruction ("TAP A SLOT, OR THE DISCARD TO THROW") does not fit it
+// on one line at a readable size. Returns the line count.
+static int wrap_text(const char* text, int fs, int width,
+                     char out[WRAP_MAX_LINES][WRAP_MAX_CHARS]) {
+    int n = 0;
+    int i = 0;
+    out[0][0] = '\0';
+    while (text[i] && n < WRAP_MAX_LINES) {
+        while (text[i] == ' ') i++;
+        if (!text[i]) break;
+        int word_start = i;
+        while (text[i] && text[i] != ' ') i++;
+        int word_len = i - word_start;
+        if (word_len >= WRAP_MAX_CHARS) word_len = WRAP_MAX_CHARS - 1;
+
+        char candidate[WRAP_MAX_CHARS];
+        int have = (int)strlen(out[n]);
+        if (have > 0) {
+            snprintf(candidate, sizeof candidate, "%s %.*s", out[n], word_len,
+                     text + word_start);
+        } else {
+            snprintf(candidate, sizeof candidate, "%.*s", word_len, text + word_start);
+        }
+        if (have > 0 && gfx_measure_text(candidate, fs) > width) {
+            n++;                                  // does not fit: start a line
+            if (n >= WRAP_MAX_LINES) break;
+            snprintf(out[n], WRAP_MAX_CHARS, "%.*s", word_len, text + word_start);
+        } else {
+            snprintf(out[n], WRAP_MAX_CHARS, "%s", candidate);
+        }
+    }
+    return (out[n][0] != '\0') ? n + 1 : n;
 }
 
 static void portrait_layout(const Game* game, PortraitLayout* L) {
     int w = GetScreenWidth(), h = GetScreenHeight();
     int m = outer_margin();
     int tb = top_bar_h(h);
-
-    // Type sizes are ratios of the screen height, and the upper bounds are
-    // deliberately generous. The portrait renderer draws at the device's real
-    // resolution -- a phone panel is ~2800px tall -- so caps tuned for the
-    // 480px landscape canvas pinned every label at a couple of physical
-    // millimetres and made the table unreadable on a real device. The LOWER
-    // bounds are the ones that still do work, on the small web canvas.
-    // One full-width row per opponent, not three blocks sharing the width.
-    // Side by side, three names had a third of the screen each and had to be
-    // shrunk to ~12pt to fit; stacked, they keep the full size.
-    int nopp = game->rules.player_count - 1;
-    L->opp_fs  = clampi(h / 44, 10, 64);
-    L->opp_row = L->opp_fs * 3 / 2;
     L->m = m;
-    L->opp_y = tb + m;
-    L->opp_h = (nopp > 0) ? nopp * L->opp_row : 0;
 
-    L->pile_label_fs = clampi(h / 52, 9, 48);
-    L->pile_w = (w - 4 * m) / 3;
-    L->pile_h = L->pile_w * 3 / 4;
-    // Keep the bottom band from swallowing a squat screen: cap at h/6.
-    if (L->pile_h > h / 6) {
-        L->pile_h = h / 6;
-        L->pile_w = L->pile_h * 4 / 3;
-    }
-    L->pile_y = h - m - L->pile_h;
+    // Column split. The rack takes the larger share: it holds ten cards and is
+    // the thing being read, while the side column holds three piles and a few
+    // short lines.
+    int usable   = w - 3 * m;
+    int rack_w   = usable * 60 / 100;
+    L->rack_x    = m;
+    L->card_w    = rack_w;
+    L->side_x    = m + rack_w + m;
+    L->side_w    = w - L->side_x - m;
 
-    // Two lines: the running totals small, the instruction large. Mid-game the
-    // line you actually read is the one telling you what a tap will do.
-    L->stats_fs  = clampi(h / 62, 8, 40);
-    L->status_fs = clampi(h / 46, 9, 56);
-    int status_h = L->stats_fs + 6 + L->status_fs + 4;
-    L->stats_y  = L->pile_y - L->pile_label_fs - 6 - status_h;
-    L->status_y = L->stats_y + L->stats_fs + 6;
-
-    // Five rows of two. Card width follows the screen instead of the old
-    // card_h*2 rule, which pinned the rack to a third of a phone's width and
-    // left the other two thirds as bare felt; card height follows the row,
-    // and the printed number is 7/10 of that, so halving the row count is what
-    // actually makes the numbers bigger.
-    int rack_top = L->opp_y + L->opp_h + m;
-    int avail = L->stats_y - m - rack_top;
-    L->rows = RACK_SLOTS / 2;
-    L->row = avail / L->rows;
-    L->card_h = L->row - m / 3;
+    // The rack owns the full height between the title bar and the bottom
+    // margin -- nothing sits above or below it any more.
+    int rack_top = tb + m;
+    int avail    = (h - m) - rack_top;
+    L->row       = avail / RACK_SLOTS;
+    L->card_h    = L->row - m / 4;
     if (L->card_h < 8) L->card_h = 8;
-    L->col_gap = m;
-    L->card_w = (w - 2 * m - L->col_gap) / 2;
-    L->rack_x = m;
-    L->rack_y = rack_top + (avail - L->row * L->rows) / 2;
-    L->label_fs = clampi(L->card_h / 4, 9, 72);
+    L->rack_y    = rack_top + (avail - L->row * RACK_SLOTS) / 2;
+    L->label_fs  = clampi(L->card_h / 4, 9, 72);
+
+    // Type in the side column is sized to ITS width, not the screen's.
+    int nopp   = game->rules.player_count - 1;
+    L->opp_fs  = clampi(h / 44, 10, 56);
+    L->opp_row = L->opp_fs * 3 / 2;
+    L->opp_y   = rack_top;
+    L->opp_h   = (nopp > 0) ? nopp * L->opp_row : 0;
+
+    // Piles stack at the bottom of the side column, where the thumb is.
+    L->pile_label_fs = clampi(h / 56, 9, 44);
+    L->pile_w        = L->side_w;
+    L->pile_h        = L->pile_w * 4 / 5;
+    L->pile_step     = L->pile_h + L->pile_label_fs + m / 2;
+    L->pile_x        = L->side_x;
+    L->pile_y        = (h - m) - L->pile_h;   // the LAST pile's card top
+
+    L->stats_fs  = clampi(h / 60, 8, 40);
+    L->status_fs = clampi(h / 48, 9, 52);
+    L->status_lh = L->status_fs * 5 / 4;
+    // Centred in whatever is left between the opponents and the pile stack.
+    int gap_top    = L->opp_y + L->opp_h + m;
+    int gap_bottom = L->pile_y - 2 * L->pile_step - L->pile_label_fs - m;
+    int block_h    = L->stats_fs + 6 + L->status_lh * 2;
+    L->stats_y  = gap_top + (gap_bottom - gap_top - block_h) / 2;
+    if (L->stats_y < gap_top) L->stats_y = gap_top;
+    L->status_y = L->stats_y + L->stats_fs + 6;
 }
 
 // Three dots beside an opponent's name, standing in for the card backs that
 // used to sit there: dim and static normally, cycling in the accent colour
-// while that seat is deciding. This is the whole of what the old ten backs
+// while that seat is deciding. This is the whole of what those ten backs
 // actually communicated -- whose turn it is -- since a rack is never revealed
 // until the round ends.
 static void draw_thinking_dots(int x, int cy, int fs, bool active) {
@@ -201,6 +236,25 @@ static int focus_seat(const Game* g) {
     return (g->rules.human_seat >= 0) ? g->rules.human_seat : 0;
 }
 
+// One pile spot in the side stack: the card, its label above it, and the
+// generous tap rectangle around both. `slot` is 0..2 top to bottom.
+static Rectangle pile_rect(const PortraitLayout* L, int slot) {
+    int y = L->pile_y - (2 - slot) * L->pile_step;
+    return (Rectangle){ (float)L->pile_x, (float)y,
+                        (float)L->pile_w, (float)L->pile_h };
+}
+
+static void draw_pile_label(const PortraitLayout* L, Rectangle r, const char* s) {
+    gfx_text(s, (int)r.x, (int)r.y - L->pile_label_fs - 4, L->pile_label_fs, SLOT_LABEL);
+}
+
+static Rectangle pile_hit(const PortraitLayout* L, Rectangle r) {
+    return (Rectangle){ r.x - L->m / 2.0f,
+                        r.y - L->pile_label_fs - 4 - L->m / 4.0f,
+                        r.width + L->m,
+                        r.height + L->pile_label_fs + L->m / 2.0f };
+}
+
 static void draw_table_portrait(const Game* game, const TableUi* ui) {
     char buf[64];
     int w = GetScreenWidth();
@@ -213,46 +267,9 @@ static void draw_table_portrait(const Game* game, const TableUi* ui) {
 
     table_hits_reset();
 
-    // Opponents band: one compact row per other seat -- name, thinking dots,
-    // score. No card backs. Ten identical backs per opponent revealed nothing
-    // (a rack stays hidden until the round-over reveal) while eating the
-    // vertical space the rack itself needs to be legible on a phone.
-    int nopp = game->rules.player_count - 1;
-    if (nopp > 0) {
-        int bi = 0;
-        for (int s = 0; s < game->rules.player_count; s++) {
-            if (s == focus) continue;
-            int by = L.opp_y + bi * L.opp_row;
-            int ty = by + (L.opp_row - L.opp_fs) / 2;
-            bool their_turn = (game->turn == s &&
-                               (game->phase == PHASE_DRAW || game->phase == PHASE_PLACE));
-            if (their_turn) {
-                gfx_rect_lines(L.m - 4, by, w - 2 * L.m + 8, L.opp_row, ACCENT);
-            }
-            snprintf(buf, sizeof buf, "%d", game->players[s].score);
-            gfx_text(buf, w - L.m - gfx_measure_text(buf, L.opp_fs), ty, L.opp_fs, YELLOW);
-
-            // Dots on a fixed centre column so the rows line up as a table.
-            int dots_w = L.opp_fs;
-            draw_thinking_dots(w / 2 - dots_w / 2, by + L.opp_row / 2, L.opp_fs,
-                               their_turn);
-
-            // Names are player-chosen online, so shrink one that would run into
-            // the dots rather than letting it overlap them.
-            const char* nm = seat_name(game, s);
-            int room = w / 2 - dots_w / 2 - L.m - L.opp_fs / 2;
-            int nfs = L.opp_fs;
-            while (nfs > 8 && gfx_measure_text(nm, nfs) > room) nfs -= 1;
-            gfx_text(nm, L.m, by + (L.opp_row - nfs) / 2, nfs,
-                     their_turn ? ACCENT : WHITE);
-            bi++;
-        }
-    }
-
-    // The rack: two columns of five, slot #50 top-left, #5 bottom-right. The
-    // slot number is printed inside the card's top-left corner -- the old
-    // outside gutter cost the cards width and left the whole group sitting
-    // right of centre.
+    // --- The rack: one column, #50 top to #5 bottom ------------------------
+    // The slot number is printed inside the card's top-left corner; the old
+    // outside gutter cost the cards width and left the group off centre.
     int dealt = deal_cards_for_seat(game, focus);
     for (int s = RACK_SLOTS - 1; s >= 0; s--) {
         Rectangle r = slot_rect(&L, s);
@@ -269,14 +286,46 @@ static void draw_table_portrait(const Game* game, const TableUi* ui) {
         // Dim ink on the pale card face, the pale label colour on bare felt.
         gfx_text(buf, x + L.card_h / 10, y + L.card_h / 12, L.label_fs,
                  filled ? (Color){140, 140, 150, 255} : SLOT_LABEL);
-        // Tap target: the card plus the gaps around it, so the whole row band
-        // stays live and no dead strip sits between the columns.
-        table_hit_set(s, (Rectangle){r.x - L.col_gap / 2.0f,
-                                     r.y - (L.row - L.card_h) / 2.0f,
-                                     r.width + L.col_gap, (float)L.row});
+        // Tap target: the card plus the row's slack, and out to the screen
+        // edge on the left so a thumb landing short of the card still counts.
+        table_hit_set(s, (Rectangle){0.0f, r.y - (L.row - L.card_h) / 2.0f,
+                                     r.x + r.width, (float)L.row});
     }
 
-    // Status line: score, round, whose turn / what a tap does.
+    // --- Side column: opponents -------------------------------------------
+    int nopp = game->rules.player_count - 1;
+    if (nopp > 0) {
+        int bi = 0;
+        for (int s = 0; s < game->rules.player_count; s++) {
+            if (s == focus) continue;
+            int by = L.opp_y + bi * L.opp_row;
+            int ty = by + (L.opp_row - L.opp_fs) / 2;
+            bool their_turn = (game->turn == s &&
+                               (game->phase == PHASE_DRAW || game->phase == PHASE_PLACE));
+            if (their_turn) {
+                gfx_rect_lines(L.side_x - 4, by, L.side_w + 8, L.opp_row, ACCENT);
+            }
+            snprintf(buf, sizeof buf, "%d", game->players[s].score);
+            int score_w = gfx_measure_text(buf, L.opp_fs);
+            gfx_text(buf, L.side_x + L.side_w - score_w, ty, L.opp_fs, YELLOW);
+
+            int dots_w = L.opp_fs;
+            draw_thinking_dots(L.side_x + L.side_w - score_w - dots_w - L.opp_fs / 3,
+                               by + L.opp_row / 2, L.opp_fs, their_turn);
+
+            // Names are player-chosen online, so shrink one that would run into
+            // the dots rather than letting it overlap them.
+            const char* nm = seat_name(game, s);
+            int room = L.side_w - score_w - dots_w - L.opp_fs;
+            int nfs = L.opp_fs;
+            while (nfs > 8 && gfx_measure_text(nm, nfs) > room) nfs -= 1;
+            gfx_text(nm, L.side_x, by + (L.opp_row - nfs) / 2, nfs,
+                     their_turn ? ACCENT : WHITE);
+            bi++;
+        }
+    }
+
+    // --- Side column: score line and the instruction -----------------------
     const char* turn_msg;
     if (game->phase == PHASE_DEAL) turn_msg = "DEALING...";
     else if (human_turn) {
@@ -287,32 +336,34 @@ static void draw_table_portrait(const Game* game, const TableUi* ui) {
         snprintf(buf, sizeof buf, "%s THINKING", seat_name(game, game->turn));
         turn_msg = buf;
     }
-    // Two lines, because they are read at different moments. The totals sit on
-    // top in small type; the instruction gets the large type, since that is the
-    // line you look at every single turn. In 2-player games an ascending rack
-    // also needs a run of 3 consecutive cards to go out, so the current longest
-    // run rides along and a sorted rack that won't finish makes sense.
+
+    // In 2-player games an ascending rack also needs a run of 3 consecutive
+    // cards to go out, so the current longest run rides along and a sorted rack
+    // that won't finish makes sense.
     char stats[64];
     if (rules_require_run(&game->rules) && game->rules.human_seat >= 0 &&
         game->phase != PHASE_DEAL && game->phase != PHASE_ROUND_OVER &&
         game->phase != PHASE_MATCH_OVER) {
         int run = score_longest_run(&game->players[game->rules.human_seat].rack);
-        snprintf(stats, sizeof stats, "%d PTS   R%d   RUN %d/3",
+        snprintf(stats, sizeof stats, "%d PTS  R%d  RUN %d/3",
                  game->players[focus].score, game->round_no, run);
     } else {
-        snprintf(stats, sizeof stats, "%d PTS   R%d",
+        snprintf(stats, sizeof stats, "%d PTS  R%d",
                  game->players[focus].score, game->round_no);
     }
-    text_centered(stats, w / 2, L.stats_y, L.stats_fs, SLOT_LABEL);
+    int sfs = L.stats_fs;
+    while (sfs > 8 && gfx_measure_text(stats, sfs) > L.side_w) sfs -= 1;
+    text_centered(stats, L.side_x + L.side_w / 2, L.stats_y, sfs, SLOT_LABEL);
 
-    // The longest instruction ("TAP A SLOT, OR THE DISCARD TO THROW") is what
-    // sets the size; shrink it to the margins rather than let it run off-screen.
-    int msg_fs = L.status_fs;
-    while (msg_fs > 9 && gfx_measure_text(turn_msg, msg_fs) > w - 2 * L.m) msg_fs -= 2;
-    text_centered(turn_msg, w / 2, L.status_y + (L.status_fs - msg_fs) / 2, msg_fs,
-                  human_turn ? ACCENT : SLOT_LABEL);
+    char lines[WRAP_MAX_LINES][WRAP_MAX_CHARS];
+    int nlines = wrap_text(turn_msg, L.status_fs, L.side_w, lines);
+    for (int i = 0; i < nlines; i++) {
+        text_centered(lines[i], L.side_x + L.side_w / 2,
+                      L.status_y + i * L.status_lh, L.status_fs,
+                      human_turn ? ACCENT : SLOT_LABEL);
+    }
 
-    // Bottom band: STOCK / DISCARD / HELD, thumb-sized, inside the margin.
+    // --- Side column: the three piles, stacked -----------------------------
     // While a card is in flight its destination draws one step behind (the
     // pile's previous top, an empty held spot), so landing = arrival.
     bool flying = anim_in_flight(game);
@@ -320,57 +371,52 @@ static void draw_table_portrait(const Game* game, const TableUi* ui) {
                                         game->anim.kind == ANIM_DRAW_DISCARD);
     bool card_arrives_pile = flying && (game->anim.kind == ANIM_PLACE ||
                                         game->anim.kind == ANIM_DISCARD);
-    int px[3];
-    px[0] = L.m;
-    px[1] = L.m * 2 + L.pile_w;
-    px[2] = L.m * 3 + L.pile_w * 2;
-    int label_y = L.pile_y - L.pile_label_fs - 4;
+    Rectangle stock_r   = pile_rect(&L, 0);
+    Rectangle discard_r = pile_rect(&L, 1);
+    Rectangle held_r    = pile_rect(&L, 2);
 
-    gfx_text("STOCK", px[0], label_y, L.pile_label_fs, SLOT_LABEL);
+    draw_pile_label(&L, stock_r, "STOCK");
     if (game->stock_count > 0) {
-        draw_card(px[0], L.pile_y, L.pile_w, L.pile_h, 0, false, false);
+        draw_card((int)stock_r.x, (int)stock_r.y, L.pile_w, L.pile_h, 0, false, false);
         snprintf(buf, sizeof buf, "x%d", game->stock_count);
-        gfx_text(buf, px[0] + 4, L.pile_y + L.pile_h - L.pile_label_fs - 2,
+        gfx_text(buf, (int)stock_r.x + 6,
+                 (int)stock_r.y + L.pile_h - L.pile_label_fs - 4,
                  L.pile_label_fs, (Color){220, 200, 180, 255});
     } else {
-        draw_card_outline(px[0], L.pile_y, L.pile_w, L.pile_h);
+        draw_card_outline((int)stock_r.x, (int)stock_r.y, L.pile_w, L.pile_h);
     }
-    table_hit_set(HIT_STOCK, (Rectangle){(float)(px[0] - L.m / 2), (float)(label_y - L.m / 2),
-                                         (float)(L.pile_w + L.m), (float)(L.pile_h + L.pile_label_fs + L.m)});
+    table_hit_set(HIT_STOCK, pile_hit(&L, stock_r));
 
-    gfx_text("DISCARD", px[1], label_y, L.pile_label_fs, SLOT_LABEL);
+    draw_pile_label(&L, discard_r, "DISCARD");
     if (card_arrives_pile) {
         if (game->discard_count >= 2) {
-            draw_card(px[1], L.pile_y, L.pile_w, L.pile_h,
+            draw_card((int)discard_r.x, (int)discard_r.y, L.pile_w, L.pile_h,
                       game->discard[game->discard_count - 2], true, false);
         } else {
-            draw_card_outline(px[1], L.pile_y, L.pile_w, L.pile_h);
+            draw_card_outline((int)discard_r.x, (int)discard_r.y, L.pile_w, L.pile_h);
         }
     } else if (game->discard_count > 0 && deal_discard_flipped(game)) {
-        draw_card(px[1], L.pile_y, L.pile_w, L.pile_h,
+        draw_card((int)discard_r.x, (int)discard_r.y, L.pile_w, L.pile_h,
                   game->discard[game->discard_count - 1], true, false);
     } else {
-        draw_card_outline(px[1], L.pile_y, L.pile_w, L.pile_h);
+        draw_card_outline((int)discard_r.x, (int)discard_r.y, L.pile_w, L.pile_h);
     }
-    table_hit_set(HIT_DISCARD, (Rectangle){(float)(px[1] - L.m / 2), (float)(label_y - L.m / 2),
-                                           (float)(L.pile_w + L.m), (float)(L.pile_h + L.pile_label_fs + L.m)});
+    table_hit_set(HIT_DISCARD, pile_hit(&L, discard_r));
 
-    gfx_text("HELD", px[2], label_y, L.pile_label_fs, SLOT_LABEL);
+    draw_pile_label(&L, held_r, "HELD");
     if (game->held_card && !draw_arrives_held) {
         bool face_up = (game->turn == focus) || game->held_from_discard;
-        draw_card(px[2], L.pile_y, L.pile_w, L.pile_h, game->held_card, face_up, false);
+        draw_card((int)held_r.x, (int)held_r.y, L.pile_w, L.pile_h,
+                  game->held_card, face_up, false);
     } else {
-        draw_card_outline(px[2], L.pile_y, L.pile_w, L.pile_h);
+        draw_card_outline((int)held_r.x, (int)held_r.y, L.pile_w, L.pile_h);
     }
 
     // The one visibly moving card, over the finished table. An opponent's
-    // exchange flies from their block, not a slot — which slot they filled is
+    // exchange flies from their row, not a slot -- which slot they filled is
     // information the table doesn't show.
     if (flying) {
         float t = anim_progress(game);
-        Rectangle stock_r   = {(float)px[0], (float)L.pile_y, (float)L.pile_w, (float)L.pile_h};
-        Rectangle discard_r = {(float)px[1], (float)L.pile_y, (float)L.pile_w, (float)L.pile_h};
-        Rectangle held_r    = {(float)px[2], (float)L.pile_y, (float)L.pile_w, (float)L.pile_h};
         Rectangle from;
         switch (game->anim.kind) {
         case ANIM_DRAW_STOCK:
@@ -387,8 +433,7 @@ static void draw_table_portrait(const Game* game, const TableUi* ui) {
                 for (int s = 0; s < game->anim.seat; s++) {
                     if (s != focus) bi++;
                 }
-                // Out of their row, from the middle of it.
-                from = (Rectangle){(float)(w / 2 - L.opp_row / 2),
+                from = (Rectangle){(float)L.side_x,
                                    (float)(L.opp_y + bi * L.opp_row),
                                    (float)L.opp_row, (float)L.opp_row};
             }
@@ -399,6 +444,7 @@ static void draw_table_portrait(const Game* game, const TableUi* ui) {
             break;
         }
     }
+    (void)w;
 }
 
 // --- Round scoring / standings / match over ---------------------------------
