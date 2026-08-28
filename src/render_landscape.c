@@ -10,6 +10,7 @@
 #include "recorder.h"
 #include <raylib.h>
 #include <stddef.h> // NULL
+#include <string.h>  // strlen
 #include <stdio.h>
 
 RenderTexture2D canvas;              // declared extern in render_internal.h; the
@@ -484,6 +485,51 @@ void render_menu_landscape(const char* title, const char* const* items, int coun
 
     LandMenuCtx c = { m, title, items, count, selected, gap_before };
     present_scaled(draw_land_menu_cb, &c);
+}
+
+// The picker on the fixed 640x480 canvas. Desktop and desktop-browser players
+// type the value outright, so this is the keyboard's read-out: same widget,
+// no tap capture.
+typedef struct {
+    PickerLayout L; const char* title; const char* slots; int cursor;
+    const char* alphabet; const char* hint; const char* ok;
+} LandPickCtx;
+static void draw_land_picker_cb(void* p) {
+    LandPickCtx* c = (LandPickCtx*)p;
+    draw_picker_panel(c->L, c->title, c->slots, c->cursor, c->alphabet, c->hint,
+                      c->ok, false);
+}
+
+void render_picker_landscape(const char* title, const char* slots, int cursor,
+                             const char* alphabet, const char* hint,
+                             const char* ok_label) {
+    int n = (int)strlen(slots);
+    if (n < 1) n = 1;
+    if (n > PICKER_MAX_SLOTS) n = PICKER_MAX_SLOTS;
+
+    int cx = BASE_WIDTH / 2;
+    int panel_w = 480, gap = 6;
+    int slot_w = (panel_w - 40 - (n - 1) * gap) / n;
+    if (slot_w > 48) slot_w = 48;
+    int slot_h = slot_w * 3 / 2, slot_fs = slot_h * 3 / 5, band_h = slot_h / 2;
+    int title_size = 40, hint_fs = 14, btn_h = 30, btn_fs = 18;
+    int panel_h = 20 + title_size + 20 + band_h + slot_h + band_h + 20
+                + hint_fs + 20 + btn_h + 20;
+    int px = cx - panel_w / 2, py = (BASE_HEIGHT - panel_h) / 2;
+
+    PickerLayout L = {
+        .cx = cx, .px = px, .py = py, .panel_w = panel_w, .panel_h = panel_h,
+        .title_size = title_size, .title_y = py + 20,
+        .slots_y = py + 20 + title_size + 20 + band_h,
+        .slot_w = slot_w, .slot_h = slot_h, .slot_gap = gap, .slot_fs = slot_fs,
+        .band_h = band_h,
+        .hint_y = py + 20 + title_size + 20 + band_h + slot_h + band_h + 20,
+        .hint_fs = hint_fs,
+        .btn_y = py + panel_h - 20 - btn_h,
+        .btn_w = panel_w * 2 / 5, .btn_h = btn_h, .btn_fs = btn_fs,
+    };
+    LandPickCtx c = { L, title, slots, cursor, alphabet, hint, ok_label };
+    present_scaled(draw_land_picker_cb, &c);
 }
 
 #endif // OR_LANDSCAPE

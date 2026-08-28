@@ -8,6 +8,7 @@
 #include "safe_area.h"
 #include <stddef.h> // NULL
 #include <stdio.h>
+#include <string.h>  // strlen
 
 #ifdef OR_PORTRAIT
 
@@ -94,8 +95,9 @@ static void draw_title_bar(void) {
 // resize (web) re-fit automatically.
 typedef struct {
     int m;                       // outer margin
-    int opp_y, opp_h;            // opponents band
-    int status_y, status_fs;     // one-line status between rack and piles
+    int opp_y, opp_h, opp_fs;    // opponents band (one compact row per seat)
+    int stats_y, stats_fs;       // points / round / run, small
+    int status_y, status_fs;     // the instruction line under it, large
     int rack_y, row, card_w, card_h, rack_x, label_fs;
     int pile_y, pile_w, pile_h, pile_label_fs; // bottom band (3 pile spots)
 } PortraitLayout;
@@ -105,13 +107,23 @@ static void portrait_layout(const Game* game, PortraitLayout* L) {
     int m = outer_margin();
     int tb = top_bar_h(h);
 
-    int opp_fs = clampi(h / 52, 8, 22);
-    int backs_h = opp_fs + opp_fs / 2;
+    // Type sizes are ratios of the screen height, and the upper bounds are
+    // deliberately generous. The portrait renderer draws at the device's real
+    // resolution -- a phone panel is ~2800px tall -- so caps tuned for the
+    // 480px landscape canvas pinned every label at a couple of physical
+    // millimetres and made the table unreadable on a real device. The LOWER
+    // bounds are the ones that still do work, on the small web canvas.
+    int nopp = game->rules.player_count - 1;
+    L->opp_fs = clampi(h / 44, 10, 64);
+    // Two or three opponents share the width; shrink so a name, its thinking
+    // dots and the score fit one block without colliding.
+    if (nopp >= 3)      L->opp_fs = L->opp_fs * 5 / 8;
+    else if (nopp == 2) L->opp_fs = L->opp_fs * 4 / 5;
     L->m = m;
     L->opp_y = tb + m;
-    L->opp_h = opp_fs + 3 + backs_h;
+    L->opp_h = (nopp > 0) ? L->opp_fs * 3 / 2 : 0;
 
-    L->pile_label_fs = clampi(h / 60, 8, 18);
+    L->pile_label_fs = clampi(h / 52, 9, 48);
     L->pile_w = (w - 4 * m) / 3;
     L->pile_h = L->pile_w * 5 / 8;
     // Keep the bottom band from swallowing a squat screen: cap at h/6.
@@ -121,20 +133,46 @@ static void portrait_layout(const Game* game, PortraitLayout* L) {
     }
     L->pile_y = h - m - L->pile_h;
 
-    L->status_fs = clampi(h / 60, 8, 16);
-    int status_h = L->status_fs + 4;
-    L->status_y = L->pile_y - L->pile_label_fs - 4 - status_h;
+    // Two lines: the running totals small, the instruction large. Mid-game the
+    // line you actually read is the one telling you what a tap will do.
+    L->stats_fs  = clampi(h / 62, 8, 40);
+    L->status_fs = clampi(h / 46, 9, 56);
+    int status_h = L->stats_fs + 6 + L->status_fs + 4;
+    L->stats_y  = L->pile_y - L->pile_label_fs - 6 - status_h;
+    L->status_y = L->stats_y + L->stats_fs + 6;
 
     int rack_top = L->opp_y + L->opp_h + m;
-    int avail = L->status_y - m - rack_top;
+    int avail = L->stats_y - m - rack_top;
     L->row = avail / RACK_SLOTS;
     L->card_h = L->row - 2;
     if (L->card_h < 8) L->card_h = 8;
     L->card_w = clampi(L->card_h * 2, L->card_h + 24, w / 2);
-    L->rack_x = (w - L->card_w) / 2;
+    L->label_fs = clampi(L->card_h / 2, 9, 56);
+    // Centre the rack as it reads: the slot labels sit outside the cards, so
+    // centring the card alone leaves the whole group visibly right of centre.
+    int label_w = gfx_measure_text("50", L->label_fs) + 8;
+    L->rack_x = (w - L->card_w + label_w) / 2;
     L->rack_y = rack_top + (avail - L->row * RACK_SLOTS) / 2;
-    L->label_fs = clampi(L->card_h / 2, 8, 20);
-    (void)game;
+}
+
+// Three dots beside an opponent's name, standing in for the card backs that
+// used to sit there: dim and static normally, cycling in the accent colour
+// while that seat is deciding. This is the whole of what the old ten backs
+// actually communicated -- whose turn it is -- since a rack is never revealed
+// until the round ends.
+static void draw_thinking_dots(int x, int cy, int fs, bool active) {
+    int d = fs / 4;
+    if (d < 3) d = 3;
+    int gap = d / 2 + 1;
+    // Wall-clock, not frame count: the animation reads the same however the
+    // display link is pacing us.
+    int lit = active ? (int)(GetTime() * 3.0) % 3 : -1;
+    for (int i = 0; i < 3; i++) {
+        Color c = (i == lit) ? ACCENT
+                : active     ? (Color){120, 120,  90, 255}
+                             : (Color){ 70,  90,  80, 255};
+        gfx_rect_rounded(x + i * (d + gap), cy - d / 2, d, d, d / 2, c);
+    }
 }
 
 // The seat whose rack fills the middle: the human, or seat 0 as the
@@ -155,11 +193,13 @@ static void draw_table_portrait(const Game* game, const TableUi* ui) {
 
     table_hits_reset();
 
-    // Opponents band: one compact block per other seat.
+    // Opponents band: one compact row per other seat -- name, thinking dots,
+    // score. No card backs. Ten identical backs per opponent revealed nothing
+    // (a rack stays hidden until the round-over reveal) while eating the
+    // vertical space the rack itself needs to be legible on a phone.
     int nopp = game->rules.player_count - 1;
     if (nopp > 0) {
         int bw = (w - L.m * (nopp + 1)) / nopp;
-        int opp_fs = L.opp_h * 2 / 5;
         int bi = 0;
         for (int s = 0; s < game->rules.player_count; s++) {
             if (s == focus) continue;
@@ -169,16 +209,22 @@ static void draw_table_portrait(const Game* game, const TableUi* ui) {
             if (their_turn) {
                 gfx_rect_lines(bx - 2, L.opp_y - 2, bw + 4, L.opp_h + 4, ACCENT);
             }
-            gfx_text(seat_name(game, s), bx, L.opp_y, opp_fs,
-                     their_turn ? ACCENT : WHITE);
             snprintf(buf, sizeof buf, "%d", game->players[s].score);
-            gfx_text(buf, bx + bw - gfx_measure_text(buf, opp_fs), L.opp_y, opp_fs, YELLOW);
-            int backs = deal_cards_for_seat(game, s);
-            int cw = (bw - 9) / 10;
-            int ch = L.opp_h - opp_fs - 3;
-            for (int i = 0; i < backs; i++) {
-                draw_card(bx + i * (cw + 1), L.opp_y + opp_fs + 3, cw, ch, 0, false, false);
-            }
+            int score_w = gfx_measure_text(buf, L.opp_fs);
+            int dots_w  = L.opp_fs;             // three dots plus their gaps
+            gfx_text(buf, bx + bw - score_w, L.opp_y + (L.opp_h - L.opp_fs) / 2,
+                     L.opp_fs, YELLOW);
+            draw_thinking_dots(bx + bw - score_w - L.opp_fs / 3 - dots_w,
+                               L.opp_y + L.opp_h / 2, L.opp_fs, their_turn);
+
+            // Names are player-chosen online, so shrink one that would run
+            // into the dots rather than letting it overlap them.
+            const char* nm = seat_name(game, s);
+            int room = bw - score_w - dots_w - L.opp_fs;
+            int nfs = L.opp_fs;
+            while (nfs > 8 && gfx_measure_text(nm, nfs) > room) nfs -= 1;
+            gfx_text(nm, bx, L.opp_y + (L.opp_h - nfs) / 2, nfs,
+                     their_turn ? ACCENT : WHITE);
             bi++;
         }
     }
@@ -211,21 +257,29 @@ static void draw_table_portrait(const Game* game, const TableUi* ui) {
         snprintf(buf, sizeof buf, "%s THINKING", seat_name(game, game->turn));
         turn_msg = buf;
     }
-    // In 2-player games an ascending rack also needs a run of 3 consecutive
-    // cards to go out; show the current longest run so a sorted rack that won't
-    // finish makes sense.
-    char status[96];
+    // Two lines, because they are read at different moments. The totals sit on
+    // top in small type; the instruction gets the large type, since that is the
+    // line you look at every single turn. In 2-player games an ascending rack
+    // also needs a run of 3 consecutive cards to go out, so the current longest
+    // run rides along and a sorted rack that won't finish makes sense.
+    char stats[64];
     if (rules_require_run(&game->rules) && game->rules.human_seat >= 0 &&
         game->phase != PHASE_DEAL && game->phase != PHASE_ROUND_OVER &&
         game->phase != PHASE_MATCH_OVER) {
         int run = score_longest_run(&game->players[game->rules.human_seat].rack);
-        snprintf(status, sizeof status, "%d PTS   R%d   RUN %d/3   %s",
-                 game->players[focus].score, game->round_no, run, turn_msg);
+        snprintf(stats, sizeof stats, "%d PTS   R%d   RUN %d/3",
+                 game->players[focus].score, game->round_no, run);
     } else {
-        snprintf(status, sizeof status, "%d PTS   R%d   %s",
-                 game->players[focus].score, game->round_no, turn_msg);
+        snprintf(stats, sizeof stats, "%d PTS   R%d",
+                 game->players[focus].score, game->round_no);
     }
-    text_centered(status, w / 2, L.status_y, L.status_fs,
+    text_centered(stats, w / 2, L.stats_y, L.stats_fs, SLOT_LABEL);
+
+    // The longest instruction ("TAP A SLOT, OR THE DISCARD TO THROW") is what
+    // sets the size; shrink it to the margins rather than let it run off-screen.
+    int msg_fs = L.status_fs;
+    while (msg_fs > 9 && gfx_measure_text(turn_msg, msg_fs) > w - 2 * L.m) msg_fs -= 2;
+    text_centered(turn_msg, w / 2, L.status_y + (L.status_fs - msg_fs) / 2, msg_fs,
                   human_turn ? ACCENT : SLOT_LABEL);
 
     // Bottom band: STOCK / DISCARD / HELD, thumb-sized, inside the margin.
@@ -337,8 +391,8 @@ static void draw_round_scoring_portrait(const Game* game) {
     int w = GetScreenWidth(), h = GetScreenHeight();
     int m = outer_margin();
     int tb = top_bar_h(h);
-    int title_fs2 = clampi(h / 22, 14, 40);
-    int fs = clampi(h / 45, 9, 20);
+    int title_fs2 = clampi(h / 22, 14, 120);
+    int fs = clampi(h / 45, 9, 56);
 
     round_banner(game, buf, sizeof buf);
     text_centered(buf, w / 2, tb + m * 2, title_fs2,
@@ -352,7 +406,7 @@ static void draw_round_scoring_portrait(const Game* game) {
     int y = tb + m * 2 + title_fs2 + 6 + fs + m * 2;
     int block_h = (h - y - m * 3 - fs) / n;
     int cw = (w - 2 * m - 9) / 10;
-    int ch = clampi(block_h - fs - 8, 12, cw * 3 / 2);
+    int ch = clampi(block_h - fs - 8, 12, cw * 2);
     for (int s = 0; s < n; s++) {
         bool won = ((int)game->round_winner == s);
         gfx_text(seat_name(game, s), m, y, fs, won ? ACCENT : WHITE);
@@ -369,8 +423,8 @@ static void draw_standings_portrait(const Game* game) {
     int w = GetScreenWidth(), h = GetScreenHeight();
     int m = outer_margin();
     int tb = top_bar_h(h);
-    int title_fs2 = clampi(h / 22, 14, 40);
-    int fs = clampi(h / 40, 10, 22);
+    int title_fs2 = clampi(h / 22, 14, 120);
+    int fs = clampi(h / 40, 10, 64);
 
     text_centered("STANDINGS", w / 2, tb + m * 2, title_fs2, WHITE);
     snprintf(buf, sizeof buf, "AFTER ROUND %d - FIRST TO %d",
@@ -409,7 +463,7 @@ static void draw_standings_portrait(const Game* game) {
             y += fs * 3;
         }
     }
-    int fs2 = clampi(h / 45, 9, 20);
+    int fs2 = clampi(h / 45, 9, 48);
     text_centered("TAP TO CONTINUE", w / 2, h - m - fs2, fs2, GRAY);
 }
 
@@ -418,8 +472,8 @@ static void draw_match_over_portrait(const Game* game) {
     int w = GetScreenWidth(), h = GetScreenHeight();
     int m = outer_margin();
     int tb = top_bar_h(h);
-    int title_fs2 = clampi(h / 20, 16, 44);
-    int fs = clampi(h / 40, 10, 22);
+    int title_fs2 = clampi(h / 20, 16, 132);
+    int fs = clampi(h / 40, 10, 64);
 
     text_centered("MATCH OVER", w / 2, tb + m * 3, title_fs2, WHITE);
 
@@ -458,7 +512,7 @@ static void draw_match_over_portrait(const Game* game) {
             y += fs * 3;
         }
     }
-    int fs2 = clampi(h / 45, 9, 20);
+    int fs2 = clampi(h / 45, 9, 48);
     text_centered("TAP TO CONTINUE", w / 2, h - m - fs2, fs2, GRAY);
 }
 
@@ -525,6 +579,59 @@ void render_menu_portrait(const char* title, const char* const* items, int count
     gfx_begin_frame();
     gfx_clear(BLACK);
     draw_menu_panel(m, title, items, count, selected, gap_before, true);
+    gfx_end_frame();
+}
+
+// The slot picker, sized off the live screen like everything else here. Twelve
+// name slots have to fit a phone's width, so the slots themselves are modest;
+// the spinner bands and the buttons are what get the thumb-sized targets.
+void render_picker_portrait(const char* title, const char* slots, int cursor,
+                            const char* alphabet, const char* hint,
+                            const char* ok_label) {
+    int w = GetScreenWidth(), h = GetScreenHeight();
+    int base = (w < h) ? w : h;
+    int n = (int)strlen(slots);
+    if (n < 1) n = 1;
+    if (n > PICKER_MAX_SLOTS) n = PICKER_MAX_SLOTS;
+
+    int pad     = base / 24;
+    int panel_w = base * 96 / 100;
+    int gap     = clampi(base / 100, 2, 20);
+    int slot_w  = (panel_w - pad - (n - 1) * gap) / n;
+    if (slot_w > base / 6) slot_w = base / 6;   // few slots shouldn't sprawl
+    int slot_h  = slot_w * 9 / 5;
+    int slot_fs = slot_h * 3 / 5;
+    int band_h  = slot_h * 4 / 5;
+
+    int title_size = clampi(h / 20, 14, 120);
+    int hint_fs    = clampi(h / 52, 9, 44);
+    int btn_h      = clampi(h / 16, 22, 150);
+    int btn_fs     = clampi(h / 34, 10, 64);
+    int btn_w      = panel_w * 2 / 5;
+
+    int panel_h = pad + title_size + pad + band_h + slot_h + band_h + pad
+                + hint_fs + pad + btn_h + pad;
+    int px = w / 2 - panel_w / 2;
+    int py = (h - panel_h) / 2;
+    int tb = top_bar_h(h);
+    if (py < tb + pad) py = tb + pad;
+
+    PickerLayout L = {
+        .cx = w / 2, .px = px, .py = py, .panel_w = panel_w, .panel_h = panel_h,
+        .title_size = title_size, .title_y = py + pad,
+        .slots_y = py + pad + title_size + pad + band_h,
+        .slot_w = slot_w, .slot_h = slot_h, .slot_gap = gap, .slot_fs = slot_fs,
+        .band_h = band_h,
+        .hint_y = py + pad + title_size + pad + band_h + slot_h + band_h + pad,
+        .hint_fs = hint_fs,
+        .btn_y = py + panel_h - pad - btn_h,
+        .btn_w = btn_w, .btn_h = btn_h, .btn_fs = btn_fs,
+    };
+
+    gfx_begin_frame();
+    gfx_clear(BLACK);
+    draw_title_bar();
+    draw_picker_panel(L, title, slots, cursor, alphabet, hint, ok_label, true);
     gfx_end_frame();
 }
 
