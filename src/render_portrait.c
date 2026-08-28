@@ -211,9 +211,20 @@ static void draw_table_portrait(const Game* game, const TableUi* ui) {
         snprintf(buf, sizeof buf, "%s THINKING", seat_name(game, game->turn));
         turn_msg = buf;
     }
+    // In 2-player games an ascending rack also needs a run of 3 consecutive
+    // cards to go out; show the current longest run so a sorted rack that won't
+    // finish makes sense.
     char status[96];
-    snprintf(status, sizeof status, "%d PTS   R%d   %s",
-             game->players[focus].score, game->round_no, turn_msg);
+    if (rules_require_run(&game->rules) && game->rules.human_seat >= 0 &&
+        game->phase != PHASE_DEAL && game->phase != PHASE_ROUND_OVER &&
+        game->phase != PHASE_MATCH_OVER) {
+        int run = score_longest_run(&game->players[game->rules.human_seat].rack);
+        snprintf(status, sizeof status, "%d PTS   R%d   RUN %d/3   %s",
+                 game->players[focus].score, game->round_no, run, turn_msg);
+    } else {
+        snprintf(status, sizeof status, "%d PTS   R%d   %s",
+                 game->players[focus].score, game->round_no, turn_msg);
+    }
     text_centered(status, w / 2, L.status_y, L.status_fs,
                   human_turn ? ACCENT : SLOT_LABEL);
 
