@@ -199,7 +199,10 @@ static void portrait_layout(const Game* game, PortraitLayout* L) {
     L->pile_y        = (h - m) - L->pile_h;   // the LAST pile's card top
 
     L->stats_fs  = clampi(h / 60, 8, 40);
-    L->status_fs = clampi(h / 48, 9, 52);
+    // The instruction is the line read every single turn, so it gets the
+    // largest type on the screen after the cards themselves. It wraps, so the
+    // narrow column costs it size only when a single WORD would overflow.
+    L->status_fs = clampi(h / 38, 9, 76);
     L->status_lh = L->status_fs * 5 / 4;
     // Centred in whatever is left between the opponents and the pile stack.
     int gap_top    = L->opp_y + L->opp_h + m;
@@ -543,52 +546,112 @@ static void draw_standings_portrait(const Game* game) {
     text_centered("TAP TO CONTINUE", w / 2, h - m - fs2, fs2, GRAY);
 }
 
+// Match over. The verdict is the hero: previously "MATCH OVER" was the largest
+// thing on screen and whether you had actually won was a smaller line beneath
+// it, so the moment the match resolved read like a system notice. Now the
+// eyebrow is small, the verdict fills a banner, and the standings sit under it
+// in finishing order rather than seat order.
 static void draw_match_over_portrait(const Game* game) {
     char buf[64];
     int w = GetScreenWidth(), h = GetScreenHeight();
     int m = outer_margin();
     int tb = top_bar_h(h);
-    int title_fs2 = clampi(h / 20, 16, 132);
-    int fs = clampi(h / 40, 10, 64);
-
-    text_centered("MATCH OVER", w / 2, tb + m * 3, title_fs2, WHITE);
 
     bool human_won;
+    char verdict[32], sub[64];
     if (game->rules.partners) {
         char tl[32];
         team_label(game, game->match_winner, tl, sizeof tl);
         human_won = (game->rules.human_seat >= 0 &&
                      game->rules.human_seat % 2 == game->match_winner);
-        snprintf(buf, sizeof buf, human_won ? "%s WIN!" : "%s WIN", tl);
+        snprintf(verdict, sizeof verdict, human_won ? "YOU WIN!" : "YOU LOSE");
+        snprintf(sub, sizeof sub, "%s TAKE THE MATCH", tl);
     } else {
         human_won = ((int)game->match_winner == game->rules.human_seat);
-        if (human_won) snprintf(buf, sizeof buf, "YOU WIN!");
-        else snprintf(buf, sizeof buf, "%s WINS", seat_name(game, game->match_winner));
+        snprintf(verdict, sizeof verdict, human_won ? "YOU WIN!" : "YOU LOSE");
+        if (human_won) {
+            snprintf(sub, sizeof sub, "%d POINTS",
+                     game->players[game->match_winner].score);
+        } else {
+            snprintf(sub, sizeof sub, "%s TAKES IT WITH %d",
+                     seat_name(game, game->match_winner),
+                     game->players[game->match_winner].score);
+        }
     }
-    text_centered(buf, w / 2, tb + m * 3 + title_fs2 + m, fs * 3 / 2,
-                  human_won ? ACCENT : WHITE);
 
-    int y = tb + m * 3 + title_fs2 + m + fs * 2 + m * 2;
+    int eyebrow_fs = clampi(h / 52, 9, 44);
+    int hero_fs    = clampi(h / 19, 18, 140);
+    int sub_fs     = clampi(h / 40, 10, 60);
+    int row_fs     = clampi(h / 40, 10, 60);
+
+    // The banner: gold for a win, a muted red for a loss, so the outcome is
+    // legible before a single word is read.
+    Color band  = human_won ? (Color){ 62,  56,  12, 255} : (Color){ 46,  22,  22, 255};
+    Color edge  = human_won ? ACCENT                      : (Color){170,  90,  90, 255};
+    Color ink   = human_won ? ACCENT                      : (Color){235, 190, 190, 255};
+
+    while (hero_fs > 16 && gfx_measure_text(verdict, hero_fs) > w - 4 * m) hero_fs -= 4;
+    while (sub_fs > 9 && gfx_measure_text(sub, sub_fs) > w - 2 * m) sub_fs -= 2;
+    int band_h = hero_fs * 3 / 2;
+    int fs2    = clampi(h / 45, 9, 48);
+
+    // Centre the whole block between the title bar and the footer rather than
+    // hanging it from the top: the screen is 2500px tall and the result was a
+    // verdict marooned above a third of a screen of empty felt.
+    int rows    = game->rules.partners ? 2 : game->rules.player_count;
+    int block_h = eyebrow_fs + m + band_h + m + sub_fs + m * 2
+                + eyebrow_fs + m + rows * row_fs * 2;
+    int y = tb + ((h - tb) - (m + fs2) - block_h) / 2;
+    if (y < tb + m) y = tb + m;
+
+    text_centered("MATCH OVER", w / 2, y, eyebrow_fs, SLOT_LABEL);
+    y += eyebrow_fs + m;
+    gfx_rect_rounded(m, y, w - 2 * m, band_h, band_h / 8, band);
+    gfx_rect_lines(m, y, w - 2 * m, band_h, edge);
+    text_centered(verdict, w / 2, y + (band_h - hero_fs) / 2, hero_fs, ink);
+    y += band_h + m;
+
+    text_centered(sub, w / 2, y, sub_fs, WHITE);
+    y += sub_fs + m * 2;
+
+    text_centered("FINAL STANDINGS", w / 2, y, eyebrow_fs, SLOT_LABEL);
+    y += eyebrow_fs + m;
+
     if (game->rules.partners) {
         for (int p = 0; p < 2; p++) {
             char tl[32];
             team_label(game, p, tl, sizeof tl);
             int total = game->players[p].score + game->players[p + 2].score;
-            gfx_text(tl, m * 2, y, fs, WHITE);
+            bool won = (p == (int)game->match_winner);
+            gfx_text(tl, m * 2, y, row_fs, won ? ACCENT : WHITE);
             snprintf(buf, sizeof buf, "%d", total);
-            gfx_text(buf, w - m * 2 - gfx_measure_text(buf, fs * 3 / 2), y, fs * 3 / 2, YELLOW);
-            y += fs * 3;
+            gfx_text(buf, w - m * 2 - gfx_measure_text(buf, row_fs), y, row_fs, YELLOW);
+            y += row_fs * 2;
         }
     } else {
-        for (int s = 0; s < game->rules.player_count; s++) {
-            gfx_text(seat_name(game, s), m * 2, y, fs,
-                     (s == game->rules.human_seat) ? ACCENT : WHITE);
+        // Finishing order, not seat order: the placing is the point.
+        int order[MAX_PLAYERS];
+        int n = game->rules.player_count;
+        for (int i = 0; i < n; i++) order[i] = i;
+        for (int i = 1; i < n; i++) {
+            for (int j = i; j > 0 &&
+                 game->players[order[j]].score > game->players[order[j - 1]].score; j--) {
+                int t = order[j]; order[j] = order[j - 1]; order[j - 1] = t;
+            }
+        }
+        for (int i = 0; i < n; i++) {
+            int s = order[i];
+            bool you = (s == game->rules.human_seat);
+            snprintf(buf, sizeof buf, "%d.", i + 1);
+            gfx_text(buf, m * 2, y + row_fs / 5, row_fs * 3 / 4, SLOT_LABEL);
+            gfx_text(seat_name(game, s), m * 2 + row_fs * 2, y, row_fs,
+                     you ? ACCENT : WHITE);
             snprintf(buf, sizeof buf, "%d", game->players[s].score);
-            gfx_text(buf, w - m * 2 - gfx_measure_text(buf, fs * 3 / 2), y, fs * 3 / 2, YELLOW);
-            y += fs * 3;
+            gfx_text(buf, w - m * 2 - gfx_measure_text(buf, row_fs), y, row_fs, YELLOW);
+            y += row_fs * 2;
         }
     }
-    int fs2 = clampi(h / 45, 9, 48);
+
     text_centered("TAP TO CONTINUE", w / 2, h - m - fs2, fs2, GRAY);
 }
 

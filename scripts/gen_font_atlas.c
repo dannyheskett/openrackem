@@ -15,7 +15,7 @@
 #include "raylib.h"
 #include <stdio.h>
 
-#define ATLAS_BASE 40   // bake size; layout is base-independent, this sets quality/atlas size
+#define ATLAS_BASE 96   // bake size; layout is base-independent, this sets quality/atlas size
 
 int main(void) {
     SetTraceLogLevel(LOG_ERROR);
