@@ -10,7 +10,7 @@
 
 // Bake the glyph atlas well above the largest on-screen size (portrait titles
 // reach ~50px) so every draw downsamples — crisp with bilinear filtering.
-#define GFX_FONT_BAKE 64
+#define GFX_FONT_BAKE 96
 
 static Font s_font;
 static bool s_font_ready = false;

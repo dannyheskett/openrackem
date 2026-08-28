@@ -82,7 +82,14 @@ void draw_card(int x, int y, int w, int h, int value, bool face_up, bool highlig
         // Fit the WIDEST value the deck can hold, not this card's own digits.
         // Sized per-card, a "9" kept the full size while a "54" was stepped
         // down to fit, so a revealed rack printed at a dozen different sizes.
-        while (fs > 8 && gfx_measure_text("00", fs) > w - 6) fs -= 2;
+        //
+        // The side margin is a FRACTION of the card, not a flat 6px. On a wide
+        // table card 6px is nothing, but on the narrow cards of the round-over
+        // reveal it let two digits run to within 3% of each edge, which is what
+        // made that screen read as shouting.
+        int pad = w / 5;
+        if (pad < 6) pad = 6;
+        while (fs > 8 && gfx_measure_text("00", fs) > w - pad) fs -= 2;
         gfx_text(txt, x + (w - gfx_measure_text(txt, fs)) / 2, y + (h - fs) / 2,
                  fs, CARD_TEXT);
     } else {
