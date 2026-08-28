@@ -79,7 +79,10 @@ void draw_card(int x, int y, int w, int h, int value, bool face_up, bool highlig
         snprintf(txt, sizeof txt, "%d", value);
         int fs = h * 7 / 10;
         if (fs < 8) fs = 8;
-        while (fs > 8 && gfx_measure_text(txt, fs) > w - 6) fs -= 2;
+        // Fit the WIDEST value the deck can hold, not this card's own digits.
+        // Sized per-card, a "9" kept the full size while a "54" was stepped
+        // down to fit, so a revealed rack printed at a dozen different sizes.
+        while (fs > 8 && gfx_measure_text("00", fs) > w - 6) fs -= 2;
         gfx_text(txt, x + (w - gfx_measure_text(txt, fs)) / 2, y + (h - fs) / 2,
                  fs, CARD_TEXT);
     } else {
