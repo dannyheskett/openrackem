@@ -270,6 +270,20 @@ static void draw_table_landscape(const Game* game, const TableUi* ui) {
         gfx_text(buf, RIGHT_X, sy, 12, GRAY);
     }
 
+    // 2-player rule reminder: an ascending rack also needs a run of 3 consecutive
+    // cards to go out, so a sorted-but-stuck rack makes sense. Shows the local
+    // player's current longest run.
+    if (rules_require_run(&game->rules) && game->rules.human_seat >= 0 &&
+        game->phase != PHASE_DEAL && game->phase != PHASE_ROUND_OVER &&
+        game->phase != PHASE_MATCH_OVER) {
+        int run = score_longest_run(&game->players[game->rules.human_seat].rack);
+        sy += 26;
+        gfx_text("2P: NEED A RUN OF 3", RIGHT_X, sy, 10, SLOT_LABEL);
+        snprintf(buf, sizeof buf, "YOUR LONGEST: %d", run);
+        Color rc = (run >= 3) ? (Color){120, 220, 120, 255} : (Color){235, 175, 90, 255};
+        gfx_text(buf, RIGHT_X, sy + 13, 12, rc);
+    }
+
     // Bottom hint line, contextual to what the keyboard can do right now.
     const char* hint = NULL;
     if (human_turn && game->phase == PHASE_DRAW) {
