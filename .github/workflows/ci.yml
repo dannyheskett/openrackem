@@ -37,6 +37,11 @@ jobs:
         run: ./scripts/build_raylib_linux.sh
       - name: Run tests
         run: make test
+      # Catch a renamed heading, a missing block, an over-length field or a
+      # banned term here rather than half way through an edit against a live
+      # store. Pure stdlib, so it costs nothing and needs no extra deps.
+      - name: Validate the store listing files
+        run: python3 scripts/store_listing.py --check
       - name: Build dev + release
         run: make all release
       - name: Build multiplayer daemon
@@ -132,8 +137,8 @@ jobs:
     timeout-minutes: 20
     env:
       NDK_VERSION: "26.3.11579264"
-      ANDROID_BUILD_TOOLS: "35.0.0"
-      ANDROID_PLATFORM_VER: "35"
+      ANDROID_BUILD_TOOLS: "36.0.0"
+      ANDROID_PLATFORM_VER: "36"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-java@v6

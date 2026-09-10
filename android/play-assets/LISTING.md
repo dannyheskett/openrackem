@@ -67,8 +67,10 @@ No dark patterns, no "energy" timers, no paywalled decks. An original implementa
 
 - Data collected: **None**
 - Data shared: **None**
-- App has no `INTERNET` permission (verify in the manifest) → "no data
-  transmitted off the device" is truthful.
+- **Re-check before submitting:** the app now declares `INTERNET` for online
+  play (the matchmaking server sees your IP and your in-game moves). The old
+  basis for "None" -- no network permission at all -- no longer holds, so the
+  answers above need a fresh look against Play's definitions.
 - Privacy policy URL: **https://danheskett.com/app/privacy-policy/** (live)
 
 ## Screenshots
