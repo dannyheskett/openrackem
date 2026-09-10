@@ -8,7 +8,10 @@ name: release
 # used everywhere, so a later push to main does not change what gets tagged. A GITHUB_TOKEN
 # tag push starts no workflow, so this never retriggers itself.
 #
-# This workflow ends at the GitHub Release (plus the Play upload when enabled). It does NOT
+# This workflow ends at the GitHub Release plus the store submissions at the bottom: the AAB
+# goes to the Play internal track, and to the public track named by the PLAY_AUTO_TRACK
+# repository variable when it is set (publish-play); the iOS build goes to App Review
+# (submit-appstore). store-release.yml ships a SPECIFIC build on demand. It does NOT
 # touch danheskett.com: the site pulls published web bundles from releases/latest at its own
 # build time, so no repo here holds a cross-repo write token.
 #
@@ -267,8 +270,8 @@ jobs:
     timeout-minutes: 10
     env:
       NDK_VERSION: "26.3.11579264"
-      ANDROID_BUILD_TOOLS: "35.0.0"
-      ANDROID_PLATFORM_VER: "35"
+      ANDROID_BUILD_TOOLS: "36.0.0"
+      ANDROID_PLATFORM_VER: "36"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-java@v6
@@ -380,27 +383,41 @@ jobs:
           fail_on_unmatched_files: true
           draft: false
 
+  # ---------------------------------------------------------------------------
+  # Ship the AAB to Google Play: upload it and release it to the internal track,
+  # and -- when the PLAY_AUTO_TRACK repository variable names a public track
+  # (alpha = closed testing, beta = open testing, production) -- release it there
+  # too and push the listing. All of it in ONE edit.
+  #
+  # One edit, because Play holds a single set of changes in review, and a commit
+  # by default CANCELS whatever is pending and resubmits. Unattended, that would
+  # restart Play's review on every merge. --skip-if-busy commits with
+  # ERROR_IF_IN_REVIEW instead: while a review is open this release skips with
+  # exit 0 and the next one carries the change -- the same contract as
+  # submit-appstore below. A second commit in the same run would find the first
+  # one in review and skip, which is why listing and tracks share the edit.
+  #
+  # PLAY_AUTO_TRACK is a variable rather than code, so moving from closed testing
+  # to production is `gh variable set PLAY_AUTO_TRACK -b production` (see
+  # docs/STORE-SETUP.md). Unset, only the internal track is touched. The optional
+  # PLAY_AUTO_ROLLOUT (e.g. 0.2) stages the public track.
+  #
+  # Gated on `publish`, not merely on the builds, so an AAB labelled release-N is
+  # never shipped for a GitHub Release that failed to exist. `!inputs.dry_run` is
+  # load-bearing: without it a dry run would still ship to Play. On a push,
+  # `inputs` is empty and the expression is falsey, which is why it is safe at
+  # job level.
+  # ---------------------------------------------------------------------------
   publish-play:
-    # Gated on `publish`, not merely on the builds. The comment on the AAB upload step
-    # above reasons that publish-play "waits for EVERY platform build first" -- true, but
-    # the GitHub Release is not a platform build. `publish` was absent from needs:, so
-    # needs.*.result never included it and the two ran in parallel: a refused tag push or
-    # a failed action-gh-release left publish red while this job shipped an AAB labelled
-    # release-N for a release that does not exist.
-    #
-    # The !cancelled()/!contains(...) apparatus is now redundant -- publish carries it,
-    # and its result == 'success' cannot be satisfied by a skipped or cancelled job.
-    #
-    # `!inputs.dry_run` is load-bearing here, not decorative: this repo publishes to
-    # Play, so without it a dry run would still ship an AAB to the internal track --
-    # the exact outcome dry_run exists to prevent. On a push, `inputs` is empty and
-    # the expression is falsey, which is why it is safe at job level.
     if: ${{ !inputs.dry_run && needs.publish.result == 'success' }}
-    name: publish AAB to the Play internal track
+    name: publish the AAB to Google Play
     needs: [prepare, publish]
     runs-on: ubuntu-22.04
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
       - name: Download the android artifact (contains the AAB)
         uses: actions/download-artifact@v8
         with:
@@ -419,18 +436,25 @@ jobs:
             echo "go=false"  >> "$GITHUB_OUTPUT"
             echo "Skipping Play publish (secret: $([ -n "$SA" ] && echo yes || echo no); AAB: $([ -n "$aab" ] && echo yes || echo no))."
           fi
-      # Pinned to the v1.1.5 commit SHA (not the mutable tag) so a retagged upstream release
-      # cannot silently change what runs against the signing key.
-      - name: Publish AAB to the Play internal track
+      - name: Install the JWT dependency
         if: steps.gate.outputs.go == 'true'
-        uses: r0adkll/upload-google-play@e738b9dd8f2476ea806d921b64aacd24f34515a5  # v1.1.5
-        with:
-          serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
-          packageName: com.danheskett.${{ github.event.repository.name }}
-          releaseFiles: ${{ steps.gate.outputs.aab }}
-          track: internal
-          status: completed
-          releaseName: release-${{ needs.prepare.outputs.version }}
+        run: python3 -m pip install --quiet cryptography
+      - name: Upload the AAB and release it
+        if: steps.gate.outputs.go == 'true'
+        env:
+          PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          BUILD: ${{ needs.prepare.outputs.version }}
+          AAB: ${{ steps.gate.outputs.aab }}
+          AUTO_TRACK: ${{ vars.PLAY_AUTO_TRACK }}
+          ROLLOUT: ${{ vars.PLAY_AUTO_ROLLOUT }}
+        run: |
+          set -euo pipefail
+          args=(release --build "$BUILD" --upload "$AAB" --track internal --skip-if-busy)
+          if [ -n "$AUTO_TRACK" ]; then
+            args+=(--track "$AUTO_TRACK" --with-listing)
+            if [ -n "$ROLLOUT" ]; then args+=(--rollout "$ROLLOUT"); fi
+          fi
+          python3 scripts/play_release.py "${args[@]}"
 
   # ---------------------------------------------------------------------------
   # Upload the signed .ipa to App Store Connect, so it shows up under TestFlight
@@ -544,6 +568,92 @@ jobs:
         run: |
           python3 -m pip install --quiet cryptography
           python3 scripts/testflight_notes.py
+
+  # ---------------------------------------------------------------------------
+  # Submit the release to App Review, so a merge to main reaches the App Store
+  # without a second, manual action.
+  #
+  # This runs AFTER testflight-notes, not in parallel with it: both PATCH the
+  # same version's localization, and testflight-notes also waits out Apple's
+  # 5-15 minute processing window, which this job needs to have finished anyway
+  # (there is no build to attach until it has).
+  #
+  # Apple allows exactly ONE submission in flight per app. --skip-if-busy makes
+  # that a no-op with an explanatory line rather than a failure: the release
+  # itself succeeded, and the next one carries the change. Without it, merging
+  # twice inside a review cycle would red a release for nothing being wrong.
+  #
+  # `store-release.yml` remains the way to submit a SPECIFIC build on demand.
+  # ---------------------------------------------------------------------------
+  submit-appstore:
+    # Gated on the UPLOAD succeeding, not on testflight-notes. It is sequenced
+    # after testflight-notes (that job waits out Apple's processing window, and
+    # ordering keeps two jobs off the same app at once), but a failure there must
+    # not veto the submission: the two touch different resources entirely --
+    # betaBuildLocalizations for TestFlight's "What to Test", against
+    # appStoreVersionLocalizations for the public listing. Apple's API also
+    # returns the occasional spurious 401, and a flaky note is no reason to hold
+    # a release back.
+    if: ${{ !inputs.dry_run && !cancelled() && needs.publish-testflight.result == 'success' }}
+    name: submit the build to App Review
+    needs: [prepare, publish-testflight, testflight-notes]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+      - name: Install the JWT dependency
+        run: python3 -m pip install --quiet cryptography
+      - name: Gate on the API-key secrets
+        id: gate
+        env:
+          K: ${{ secrets.ASC_KEY_P8 }}
+          I: ${{ secrets.ASC_KEY_ID }}
+          S: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          if [ -n "$K" ] && [ -n "$I" ] && [ -n "$S" ]; then echo "go=true" >> "$GITHUB_OUTPUT";
+          else echo "go=false" >> "$GITHUB_OUTPUT"; echo "No ASC_* secrets; skipping."; fi
+      # Order matters and is the reverse of Play's, the same way store-release.yml
+      # does it: Apple hangs the listing off a VERSION record, so the version has
+      # to exist before there is anything to write a description or screenshots
+      # onto. Pushing the listing first fails with "no editable version".
+      - name: Create the version and attach the build
+        if: steps.gate.outputs.go == 'true'
+        env:
+          ASC_KEY_P8:    ${{ secrets.ASC_KEY_P8 }}
+          ASC_KEY_ID:    ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          BUILD: ${{ needs.prepare.outputs.version }}
+        run: |
+          # "What's New" defaults to a standard line inside asc_release.py. It is
+          # deliberately not the commit subject: that is written for developers,
+          # not for customers, and would put a PR title on the public App Store
+          # page.
+          python3 scripts/asc_release.py release --build "$BUILD" --skip-if-busy
+      # Pushed from the repo, so the description and screenshots Apple reviews are
+      # the ones committed here rather than whatever was last typed into the
+      # console.
+      - name: Push the store listing
+        if: steps.gate.outputs.go == 'true'
+        env:
+          ASC_KEY_P8:    ${{ secrets.ASC_KEY_P8 }}
+          ASC_KEY_ID:    ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        # --skip-if-busy for the same reason the steps either side of it carry
+        # it: when a version is already in review there is no editable version to
+        # write a listing onto, and the whole job has to no-op together.
+        run: python3 scripts/asc_release.py listing --skip-if-busy
+      - name: Submit for review
+        if: steps.gate.outputs.go == 'true'
+        env:
+          ASC_KEY_P8:    ${{ secrets.ASC_KEY_P8 }}
+          ASC_KEY_ID:    ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          BUILD: ${{ needs.prepare.outputs.version }}
+        run: |
+          python3 scripts/asc_release.py release \
+            --build "$BUILD" --submit --skip-if-busy
 
   # ---------------------------------------------------------------------------
   # Deploy the multiplayer daemon (src-server/) to Fly.io on every release, so

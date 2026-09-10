@@ -12,7 +12,7 @@
     <!-- versionCode/versionName are intentionally absent: aapt/aapt2
          - -version-code/- -version-name only inject when the manifest has none,
          so hardcoding them here would silently pin every Play upload to 1. -->
-    <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="35" />
+    <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="36" />
 
     <!-- The online client (net_posix.c over OpenSSL) opens a wss socket to the
          matchmaking server; without INTERNET, connect() fails with EPERM. -->
@@ -24,6 +24,18 @@
                  android:icon="@mipmap/ic_launcher"
                  android:hasCode="true"
                  android:allowBackup="false">
+
+        <!-- Apps targeting API 36 have android:screenOrientation ignored on any
+             display >= sw600dp: tablets and unfolded foldables get a resizable
+             window whatever the activity asks for. Android draws only the
+             portrait layout (render_use_portrait() is fixed true in render.c),
+             so this property opts back into the pre-36 behaviour and keeps the
+             portrait lock everywhere.
+
+             This is a deferral, not a fix: Google removes the opt-out at API 37,
+             at which point Android needs to pick the renderer by window aspect. -->
+        <property android:name="android.window.PROPERTY_COMPAT_ALLOW_RESTRICTED_RESIZABILITY"
+                  android:value="true" />
 
         <activity android:name="com.danheskett.openrackem.OpenrackemActivity"
                   android:label="openrackem"
