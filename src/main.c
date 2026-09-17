@@ -76,9 +76,16 @@ static void play_event_sounds(const Game* g, unsigned events) {
     if (events & EV_TURN)         sound_play(SFX_TURN);
 }
 
-// Build the current menu. Returns the item count; fills labels[] and actions[].
-static int build_menu(bool resumable, const char* labels[], MenuAction actions[]) {
+// Build the current menu. Returns the item count; fills labels[] and actions[],
+// and sets *gap_before to the index that should have a blank line above it --
+// Exit, which is set apart from the rest -- or -1 when this build has no Exit
+// item at all (mobile and web, where the OS or the browser tab owns the
+// lifecycle). A fixed "last item" index put the gap above whatever happened to
+// be last, which on those builds was an ordinary setting.
+static int build_menu(bool resumable, const char* labels[], MenuAction actions[],
+                      int* gap_before) {
     int n = 0;
+    *gap_before = -1;
     if (resumable) { labels[n] = "Resume Game"; actions[n++] = ACT_RESUME; }
     labels[n] = "New Game"; actions[n++] = ACT_NEW;
     if (net_available()) { labels[n] = "Play Online"; actions[n++] = ACT_ONLINE; }
@@ -95,6 +102,7 @@ static int build_menu(bool resumable, const char* labels[], MenuAction actions[]
 #elif !defined(PLATFORM_IOS) && !defined(PLATFORM_ANDROID)
     // Mobile apps don't self-terminate (the OS owns the lifecycle: home gesture /
     // back button on Android, Apple guidelines on iOS), so no Exit on either.
+    *gap_before = n;
     labels[n] = "Exit"; actions[n++] = ACT_EXIT;
 #endif
     return n;
@@ -513,7 +521,8 @@ static void frame_step(void* arg) {
     bool resumable = (c->game != NULL && !game_is_over(c->game));
     const char* labels[MAX_MENU_ITEMS];
     MenuAction actions[MAX_MENU_ITEMS];
-    int menu_count = build_menu(resumable, labels, actions);
+    int gap_before = -1;
+    int menu_count = build_menu(resumable, labels, actions, &gap_before);
 
     switch (c->state) {
     case STATE_MENU: {
@@ -818,7 +827,7 @@ static void frame_step(void* arg) {
     // here: a same-frame transition (menu -> options) otherwise falls into a
     // branch whose data doesn't exist yet (there is no game before New Game).
     if (c->state == STATE_MENU) {
-        render_menu("OPENRACKEM", labels, menu_count, c->selected, menu_count - 1);
+        render_menu("OPENRACKEM", labels, menu_count, c->selected, gap_before);
     } else if (c->state == STATE_OPTIONS) {
         const char* opt_labels[OPT_ITEMS];
         int opt_count = build_options(opt_labels);
