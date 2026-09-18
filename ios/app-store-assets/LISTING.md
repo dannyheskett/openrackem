@@ -83,6 +83,15 @@ openrackem is open source. Read the code, report a bug, or build it yourself: ht
 No dark patterns, no "energy" timers, no paywalled decks. Just the card game, done properly.
 ```
 
+## App Review notes
+
+Sent to Apple's reviewer with every submission that has none yet
+(`scripts/asc_release.py` sets them, with the team's review contact).
+
+```
+Thank you very much for reviewing my game. openrackem is a rack-sorting card game played solo against the computer or online: draw a card and slot it into your rack until all ten are in order. It needs no account or sign-in. Two players is the easiest way to start, and four players is a bigger challenge; easy mode wins most hands. A two-finger tap opens the menu.
+```
+
 ## App information
 
 - **Category (primary):** Games -> Card
