@@ -21,8 +21,7 @@ static int title_bar_h(int h) { int fs = title_fs(h); return fs + fs / 2; }
 // cutout (front camera) when the surface draws under it, so neither the
 // wordmark nor the table below ever sits beneath the camera.
 static int top_bar_h(int h) {
-    int top, cl, cr;
-    safe_area_get(&top, &cl, &cr);
+    int top = safe_area_get().top;
     int tb = title_bar_h(h);
     return (top > tb) ? top : tb;
 }
@@ -56,8 +55,8 @@ static void draw_title_bar(void) {
     int ty = (tb_h - fs) / 2;   // wordmark vertically centered in the bar
     gfx_rect(0, 0, w, tb_h, DARKGRAY);
 
-    int top, cl, cr;
-    safe_area_get(&top, &cl, &cr);
+    SafeArea sa = safe_area_get();
+    int top = sa.top, cl = sa.cutout_left, cr = sa.cutout_right;
     int full = gfx_measure_text("OPENRACKEM", fs);
 
     // No horizontal extent reported. With no top inset either, there is no
@@ -229,7 +228,7 @@ static void draw_thinking_dots(int x, int cy, int fs, bool active) {
         Color c = (i == lit) ? ACCENT
                 : active     ? (Color){120, 120,  90, 255}
                              : (Color){ 70,  90,  80, 255};
-        gfx_rect_rounded(x + i * (d + gap), cy - d / 2, d, d, d / 2, c);
+        rect_rounded_px(x + i * (d + gap), cy - d / 2, d, d, d / 2, c);
     }
 }
 
@@ -606,7 +605,7 @@ static void draw_match_over_portrait(const Game* game) {
 
     text_centered("MATCH OVER", w / 2, y, eyebrow_fs, SLOT_LABEL);
     y += eyebrow_fs + m;
-    gfx_rect_rounded(m, y, w - 2 * m, band_h, band_h / 8, band);
+    rect_rounded_px(m, y, w - 2 * m, band_h, band_h / 8, band);
     gfx_rect_lines(m, y, w - 2 * m, band_h, edge);
     text_centered(verdict, w / 2, y + (band_h - hero_fs) / 2, hero_fs, ink);
     y += band_h + m;
@@ -694,31 +693,6 @@ void render_frame_portrait(const Game* g, const TableUi* ui) {
 }
 void render_pause_portrait(const Game* g, const TableUi* ui) {
     draw_scene_portrait(g, ui, "GAME PAUSED", "Tap to resume", YELLOW);
-}
-
-void render_menu_portrait(const char* title, const char* const* items, int count,
-                          int selected, int gap_before) {
-    int w = GetScreenWidth(), h = GetScreenHeight();
-    int line_h = h / 20, item_fs = h / 28;
-    int extra = (gap_before >= 0) ? 1 : 0;
-    int base = (w < h) ? w : h;              // keep the panel compact in a wide window
-    int panel_w = base * 82 / 100;
-
-    // Shrink the title if it would overrun the panel (wide tablets).
-    int title_size = h / 16;
-    while (title_size > 12 && gfx_measure_text(title, title_size) > panel_w - line_h) title_size -= 2;
-
-    int panel_h = title_size + line_h + (count + extra) * line_h + line_h * 2;
-    int px = w / 2 - panel_w / 2, py = (h - panel_h) / 2;
-    MenuLayout m = { .cx = w / 2, .px = px, .py = py, .panel_w = panel_w, .panel_h = panel_h,
-                     .title_size = title_size, .title_y = py + line_h,
-                     .items_y = py + line_h + title_size + line_h,
-                     .line_h = line_h, .item_fs = item_fs };
-
-    gfx_begin_frame();
-    gfx_clear(BLACK);
-    draw_menu_panel(m, title, items, count, selected, gap_before, true);
-    gfx_end_frame();
 }
 
 // The slot picker, sized off the live screen like everything else here. Twelve

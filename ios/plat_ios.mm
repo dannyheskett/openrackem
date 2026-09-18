@@ -1,5 +1,5 @@
 // iOS platform layer: implements the raylib-compatible query functions the C
-// game code calls (declared in ob_types.h), backed by state the UIKit view
+// game code calls (declared in or_types.h), backed by state the UIKit view
 // pushes in (ios_main.mm). No raylib.
 #import <QuartzCore/QuartzCore.h> // CACurrentMediaTime
 #import <Foundation/Foundation.h> // NSSearchPathForDirectoriesInDomains (prefs path)
@@ -8,7 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "ob_types.h"
+#include "or_types.h"
 #include "plat_ios.h"
 
 // --- State fed by the view -------------------------------------------------
@@ -33,7 +33,7 @@ void plat_ios_set_touches(const Vector2* points_px, int count) {
 void plat_ios_post_gesture(int gesture) { s_gesture = gesture; }
 void plat_ios_set_focus(bool focused)   { s_focused = focused; }
 
-// --- Queries the game reads (C linkage via ob_types.h's extern "C") --------
+// --- Queries the game reads (C linkage via or_types.h's extern "C") --------
 int GetScreenWidth(void)  { return s_screen_w; }
 int GetScreenHeight(void) { return s_screen_h; }
 int GetTouchPointCount(void) { return s_touch_count; }

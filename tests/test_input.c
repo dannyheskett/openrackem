@@ -1,7 +1,7 @@
 // Unit tests for the touch-gesture recognizer in input.c. Like test_game.c,
 // the code under test runs in isolation — no raylib, no window — by compiling
 // with -DPLATFORM_IOS, the raylib-free configuration input.c already supports:
-// ob_types.h supplies the types and declares the touch/clock queries, and this
+// or_types.h supplies the types and declares the touch/clock queries, and this
 // file provides scripted fakes of them. The recognizer under test is the same
 // C compiled into every touch platform (Android / web / iOS); only the poll
 // surface behind it differs.

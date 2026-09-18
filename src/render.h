@@ -3,7 +3,7 @@
 
 #include "game.h"
 #include "platform.h"
-#include "ob_types.h"
+#include "or_types.h"
 #include <stdbool.h>
 
 // The landscape renderer draws to a fixed 640x480 off-screen canvas that
@@ -20,6 +20,7 @@ typedef struct {
     bool standings;   // in PHASE_ROUND_OVER: false = round scoring, true = standings
 } TableUi;
 
+// Window setup and teardown (window.c) plus the recorder's capture canvas.
 void render_init(void);
 void render_cleanup(void);
 
@@ -34,20 +35,10 @@ void render_pause(const Game* game, const TableUi* ui);
 // falls back to "YOU" / "CPU N").
 void render_set_seat_labels(const char labels[][16], int count);
 void render_clear_seat_labels(void);
-// Floating menu: title plus a list of items, one highlighted. gap_before, if
-// >= 0, inserts a blank line before that item index.
+// The family menu (menu.c). gap_before, if >= 0, inserts a blank line before
+// that item index. Hit-test its rows with menu_hit_test().
 void render_menu(const char* title, const char* const* items, int count,
                  int selected, int gap_before);
-
-bool render_window_should_close(void);
-void render_toggle_fullscreen(void);
-// True while the app window holds input focus. Used to auto-pause when the app
-// is sent to the background (Android suspend/resume).
-bool render_window_focused(void);
-
-// Return the menu item index at screen point `p`, or -1 if none. Uses the item
-// rectangles captured by the last render_menu() call (touch menus).
-int render_menu_hit_test(Vector2 p);
 
 // Slot picker: the player-name and room-code entry screens. `slots` is one
 // character per slot (NUL-terminated), `cursor` the slot being edited, and

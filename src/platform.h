@@ -1,6 +1,14 @@
 #ifndef OPENRACKEM_PLATFORM_H
 #define OPENRACKEM_PLATFORM_H
 
+// The game's name: window title and recording file prefix.
+#define GAME_NAME "openrackem"
+
+// Recording size (recorder.c): the landscape layout's 640x480 logical space.
+// Both are multiples of 16 for the H.264 encoder.
+#define REC_W 640
+#define REC_H 480
+
 // OR_TOUCH selects the touch-first mobile frontend: the adaptive portrait
 // layout, on-screen control buttons, and tap-driven menus. It is enabled on
 // Android and on the WebAssembly build (which targets mobile browsers but also

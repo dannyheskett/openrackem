@@ -22,6 +22,11 @@ typedef struct {
     bool throw_pressed;         // X: discard a stock-drawn held card
     bool pause_pressed;         // Enter (the loop uses it when nothing confirms)
 
+    // Mouse (desktop, and the web build's desktop layout): a click on a menu
+    // row chooses it.
+    int  mouse_x, mouse_y;
+    bool left_pressed;    // left button just went down
+
     // Menu / overlays
     bool menu_up, menu_down;    // move the menu cursor
     bool menu_left, menu_right; // cycle an Options value

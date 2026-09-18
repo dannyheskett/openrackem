@@ -57,17 +57,12 @@ void draw_flying_card(Rectangle from, Rectangle to, float t, int value, bool fac
 void table_hits_reset(void);
 void table_hit_set(int id, Rectangle r);   // id: 0..9 slots, HIT_STOCK, HIT_DISCARD
 
-// Computed menu geometry + the shared menu drawer (defined in render.c). Each
-// renderer fills the layout from its own sizing.
-typedef struct {
-    int cx, px, py, panel_w, panel_h;
-    int title_size, title_y, items_y, line_h, item_fs;
-} MenuLayout;
-void draw_menu_panel(MenuLayout m, const char* title, const char* const* items,
-                     int count, int selected, int gap_before, bool capture);
+// Rounded rectangle with the corner radius in pixels (clamped to half the
+// shorter side), over gfx_rect_rounded's roundness fraction.
+void rect_rounded_px(int x, int y, int w, int h, int radius, Color color);
 
 // Computed slot-picker geometry + its shared drawer (defined in render.c),
-// filled by each renderer the same way MenuLayout is. `capture` records the
+// filled by each renderer from its own sizing. `capture` records the
 // slot and button rectangles for touch; landscape passes false.
 typedef struct {
     int cx, px, py, panel_w, panel_h;
@@ -86,18 +81,13 @@ void draw_picker_panel(PickerLayout p, const char* title, const char* slots,
 #ifdef OR_PORTRAIT
 void render_frame_portrait(const Game* game, const TableUi* ui);
 void render_pause_portrait(const Game* game, const TableUi* ui);
-void render_menu_portrait(const char* title, const char* const* items, int count,
-                          int selected, int gap_before);
 void render_picker_portrait(const char* title, const char* slots, int cursor,
                             const char* alphabet, const char* hint,
                             const char* ok_label);
 #endif
 #ifdef OR_LANDSCAPE
-extern RenderTexture2D canvas; // created in render_init, blitted by present()
 void render_frame_landscape(const Game* game, const TableUi* ui);
 void render_pause_landscape(const Game* game, const TableUi* ui);
-void render_menu_landscape(const char* title, const char* const* items, int count,
-                           int selected, int gap_before);
 void render_picker_landscape(const char* title, const char* slots, int cursor,
                              const char* alphabet, const char* hint,
                              const char* ok_label);

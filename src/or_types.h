@@ -1,18 +1,18 @@
-#ifndef OPENRACKEM_OB_TYPES_H
-#define OPENRACKEM_OB_TYPES_H
+#ifndef OR_TYPES_H_INCLUDED
+#define OR_TYPES_H_INCLUDED
 
 // Geometry / colour types and the handful of raylib query functions the shared
 // game code uses, decoupled from raylib so the iOS build (which links no raylib)
 // still compiles. On every raylib platform this is just <raylib.h>, so those
 // builds are completely unchanged. On iOS we provide layout-identical structs,
-// raylib's named colours, and declarations for the queries that plat_ios
-// implements (screen size, touch, gestures, time, focus).
+// the named colours the renderer uses, and declarations for the queries that
+// plat_ios implements (screen size, touch, gestures, time, focus).
 
 #if !defined(PLATFORM_IOS)
 
 #include <raylib.h>
 
-#else // PLATFORM_IOS: no raylib — provide the compatible surface ourselves.
+#else // PLATFORM_IOS: no raylib -- provide the compatible surface ourselves.
 
 #include <stdbool.h>
 
@@ -20,7 +20,7 @@ typedef struct { float x, y; }                Vector2;
 typedef struct { float x, y, width, height; } Rectangle;
 typedef struct { unsigned char r, g, b, a; }  Color; // identical layout to raylib
 
-// raylib's named colours, exact RGBA, so render.c's colour literals resolve.
+// raylib's named colours, exact RGBA, so the renderer's colour literals resolve.
 #define BLACK     ((Color){   0,   0,   0, 255 })
 #define WHITE     ((Color){ 255, 255, 255, 255 })
 #define LIGHTGRAY ((Color){ 200, 200, 200, 255 })
@@ -28,6 +28,10 @@ typedef struct { unsigned char r, g, b, a; }  Color; // identical layout to rayl
 #define DARKGRAY  ((Color){  80,  80,  80, 255 })
 #define YELLOW    ((Color){ 253, 249,   0, 255 })
 #define RED       ((Color){ 230,  41,  55, 255 })
+
+#ifndef PI
+#define PI 3.14159265358979323846f
+#endif
 
 // Pure-geometry helper raylib normally provides.
 static inline bool CheckCollisionPointRec(Vector2 p, Rectangle r) {
@@ -48,7 +52,7 @@ enum {
 // These are defined in Objective-C++ (plat_ios.mm) but called from the C game
 // code, so they need C linkage to link. TextFormat matches raylib's semantics
 // (a pointer into an internal rotating buffer); the queries are UIKit-backed and
-// keep raylib's names so render.c / input.c call sites are unchanged.
+// keep raylib's names so the renderer / input.c call sites are unchanged.
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -67,4 +71,4 @@ bool    WindowShouldClose(void);
 
 #endif // PLATFORM_IOS
 
-#endif // OPENRACKEM_OB_TYPES_H
+#endif // OR_TYPES_H_INCLUDED
