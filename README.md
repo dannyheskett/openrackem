@@ -30,8 +30,31 @@ Targets: **Linux**, **Windows** (x64/x86), **macOS** (universal), **Web**
   125/175/275/475 totals) and Partners (4 players, pairs) variants.
 
 `Escape` returns to the menu (game stays resumable), `Enter` pauses,
-`Alt+Enter` toggles fullscreen. On touch screens everything is a tap; a
-two-finger tap returns to the menu.
+`Alt+Enter` toggles fullscreen. Click a menu row to choose it. On touch
+screens everything is a tap; a two-finger tap returns to the menu.
+
+## Menu and window
+
+These behave identically in every game in this family (openblocks, openrackem,
+openklondike, opencheckers, openpairs, opensweeper). The code for them
+(`src/menu.c`, `src/window.c`, `src/present.c`, and the gfx, safe-area,
+timing, audio and recorder layers) is the same file in every repo.
+
+- **Menu**: Resume Game (when a game is in progress), New Game, Options (when
+  the game has settings), Sound, Record (desktop only), Exit (desktop only, set
+  apart by a blank line). Options holds the settings and Back.
+- **Menu input**: Up / Down (or W / S) move, Enter / Space choose, Left / Right
+  (or A / D) cycle an Options value, Escape backs out. A mouse click or a tap on
+  a row chooses it. Swipes move the selection and cycle values.
+- **Menu size**: derived from the long edge of the view, so it is the same size
+  upright and sideways and grows with the window; it shrinks only when its rows
+  would not otherwise fit.
+- **Back to the menu**: Escape, Android Back, or a two-finger tap. Losing focus
+  (app backgrounded, tab hidden, window deactivated) also returns to the menu;
+  the game stays resumable.
+- **Window**: desktop opens at 960×720, resizes freely down to 640×480, and
+  Alt+Enter toggles borderless fullscreen and back to the previous window.
+  Web fills the browser viewport. Android and iOS are fullscreen.
 
 ## Building
 

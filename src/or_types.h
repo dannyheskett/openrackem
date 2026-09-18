@@ -1,5 +1,5 @@
-#ifndef OPENRACKEM_OB_TYPES_H
-#define OPENRACKEM_OB_TYPES_H
+#ifndef OPENRACKEM_OR_TYPES_H
+#define OPENRACKEM_OR_TYPES_H
 
 // Geometry / colour types and the handful of raylib query functions the shared
 // game code uses, decoupled from raylib so the iOS build (which links no raylib)
@@ -67,4 +67,4 @@ bool    WindowShouldClose(void);
 
 #endif // PLATFORM_IOS
 
-#endif // OPENRACKEM_OB_TYPES_H
+#endif // OPENRACKEM_OR_TYPES_H

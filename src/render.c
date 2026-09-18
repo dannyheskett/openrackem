@@ -1,7 +1,10 @@
-// Common renderer TU: shared state and draw helpers, window/loop lifecycle, and
-// the public entry points that dispatch to the active renderer. The two
-// renderers live in render_portrait.c and render_landscape.c.
+// Common renderer TU: shared state and draw helpers, lifecycle, and the public
+// entry points that dispatch to the active renderer. The two renderers live in
+// render_portrait.c and render_landscape.c.
 #include "render_internal.h"
+#include "menu.h"
+#include "present.h"
+#include "window.h"
 #include <stdio.h>
 #include <string.h>
 #if !defined(PLATFORM_IOS)
@@ -53,22 +56,22 @@ void draw_card(int x, int y, int w, int h, int value, bool face_up, bool highlig
     int r = card_radius(h);
 
     // Soft drop shadow (two stacked translucent rounded rects, offset down-right).
-    gfx_rect_rounded(x + 2, y + 3, w, h, r, with_alpha((Color){0, 0, 0, 255}, 45));
-    gfx_rect_rounded(x + 1, y + 2, w, h, r, with_alpha((Color){0, 0, 0, 255}, 30));
+    rect_rounded_px(x + 2, y + 3, w, h, r, with_alpha((Color){0, 0, 0, 255}, 45));
+    rect_rounded_px(x + 1, y + 2, w, h, r, with_alpha((Color){0, 0, 0, 255}, 30));
 
     // Selection glow, spreading beyond the card edges.
     if (highlight) {
-        gfx_rect_rounded(x - 3, y - 3, w + 6, h + 6, r + 3, with_alpha(ACCENT, 55));
-        gfx_rect_rounded(x - 2, y - 2, w + 4, h + 4, r + 2, with_alpha(ACCENT, 95));
+        rect_rounded_px(x - 3, y - 3, w + 6, h + 6, r + 3, with_alpha(ACCENT, 55));
+        rect_rounded_px(x - 2, y - 2, w + 4, h + 4, r + 2, with_alpha(ACCENT, 95));
     }
 
     // Border ring, then the inset body (thicker accent border when highlighted).
     int bt = highlight ? 2 : 1;
     int ir = r - bt < 1 ? 1 : r - bt;
-    gfx_rect_rounded(x, y, w, h, r, highlight ? ACCENT : CARD_EDGE);
+    rect_rounded_px(x, y, w, h, r, highlight ? ACCENT : CARD_EDGE);
 
     if (face_up) {
-        gfx_rect_rounded(x + bt, y + bt, w - 2 * bt, h - 2 * bt, ir, CARD_FACE);
+        rect_rounded_px(x + bt, y + bt, w - 2 * bt, h - 2 * bt, ir, CARD_FACE);
         // Top sheen: a gentle vertical gradient over the interior, inset by the
         // radius so its square corners stay within the rounded face.
         if (w > 2 * r + 2 && h > 8) {
@@ -93,14 +96,14 @@ void draw_card(int x, int y, int w, int h, int value, bool face_up, bool highlig
         gfx_text(txt, x + (w - gfx_measure_text(txt, fs)) / 2, y + (h - fs) / 2,
                  fs, CARD_TEXT);
     } else {
-        gfx_rect_rounded(x + bt, y + bt, w - 2 * bt, h - 2 * bt, ir, CARD_BACK);
+        rect_rounded_px(x + bt, y + bt, w - 2 * bt, h - 2 * bt, ir, CARD_BACK);
         // Printed-back frame: a tan ring inset from the edge.
         int inset = (w / 7 < 3) ? 3 : w / 7;
         int fr = ir - 1 < 1 ? 1 : ir - 1;
         if (w > 2 * inset + 4 && h > 2 * inset + 4) {
-            gfx_rect_rounded(x + inset, y + inset, w - 2 * inset, h - 2 * inset, fr,
+            rect_rounded_px(x + inset, y + inset, w - 2 * inset, h - 2 * inset, fr,
                              (Color){200, 160, 120, 255});
-            gfx_rect_rounded(x + inset + 2, y + inset + 2, w - 2 * inset - 4,
+            rect_rounded_px(x + inset + 2, y + inset + 2, w - 2 * inset - 4,
                              h - 2 * inset - 4, fr > 2 ? fr - 2 : 1, CARD_BACK);
         }
     }
@@ -231,42 +234,21 @@ int render_table_hit_test(Vector2 p) {
     return HIT_NONE;
 }
 
-static Rectangle s_menu_item_rects[8];
-static int s_menu_item_count = 0;
+void rect_rounded_px(int x, int y, int w, int h, int radius, Color color) {
+    if (w <= 0 || h <= 0) return;
+    int shorter = (w < h) ? w : h;
+    float roundness = (float)(2 * radius) / (float)shorter;
+    if (roundness > 1.0f) roundness = 1.0f;
+    if (roundness < 0.0f) roundness = 0.0f;
+    gfx_rect_rounded(x, y, w, h, roundness, color);
+}
 
-// Draw the menu panel, centred title, and item list with selection markers.
-// `capture` records each row's rectangle for touch hit-testing (portrait);
-// landscape passes false (keyboard-only).
-void draw_menu_panel(MenuLayout m, const char* title, const char* const* items,
-                     int count, int selected, int gap_before, bool capture) {
-    gfx_rect(m.px, m.py, m.panel_w, m.panel_h, (Color){15, 15, 25, 255});
-    gfx_rect_lines(m.px, m.py, m.panel_w, m.panel_h, LIGHTGRAY);
-    // Shrink a long title to fit inside the panel (e.g. "WAITING FOR PLAYERS"),
-    // then re-center it in the original title band.
-    int ts = m.title_size;
-    int maxw = m.panel_w - 24;
-    while (ts > 10 && gfx_measure_text(title, ts) > maxw) ts -= 2;
-    gfx_text(title, m.cx - gfx_measure_text(title, ts) / 2,
-             m.title_y + (m.title_size - ts) / 2, ts, WHITE);
-
-    s_menu_item_count = capture ? ((count < 8) ? count : 8) : 0;
-    int y = m.items_y;
-    for (int i = 0; i < count; i++) {
-        if (gap_before == i) y += m.line_h;
-        const char* label = items[i];
-        int lw = gfx_measure_text(label, m.item_fs);
-        Color col = (i == selected) ? YELLOW : GRAY;
-        if (i == selected) {
-            gfx_text(">", m.cx - lw / 2 - m.item_fs * 3 / 2, y, m.item_fs, YELLOW);
-            gfx_text("<", m.cx + lw / 2 + m.item_fs / 2, y, m.item_fs, YELLOW);
-        }
-        gfx_text(label, m.cx - lw / 2, y, m.item_fs, col);
-        if (capture && i < 8) {
-            s_menu_item_rects[i] = (Rectangle){ (float)m.px, (float)(y - (m.line_h - m.item_fs) / 2),
-                                                (float)m.panel_w, (float)m.line_h };
-        }
-        y += m.line_h;
-    }
+// The family menu (menu.c) in this game's colours.
+static MenuTheme menu_theme(void) {
+    MenuTheme t = { .background = BLACK, .panel = (Color){15, 15, 25, 255},
+                    .edge = LIGHTGRAY, .title = WHITE, .item = GRAY,
+                    .selected = YELLOW };
+    return t;
 }
 
 // --- Slot picker -----------------------------------------------------------
@@ -315,7 +297,7 @@ static void draw_slot_char(char c, int cx, int y, int fs, Color col) {
 
 static void draw_picker_button(int x, int y, int w, int h, int fs,
                                const char* label, Color edge) {
-    gfx_rect_rounded(x, y, w, h, h / 4, (Color){28, 28, 42, 255});
+    rect_rounded_px(x, y, w, h, h / 4, (Color){28, 28, 42, 255});
     gfx_rect_lines(x, y, w, h, edge);
     gfx_text(label, x + (w - gfx_measure_text(label, fs)) / 2, y + (h - fs) / 2,
              fs, edge);
@@ -352,8 +334,8 @@ void draw_picker_panel(PickerLayout L, const char* title, const char* slots,
     int up_y    = L.slots_y - L.band_h;
     int down_y  = L.slots_y + L.slot_h;
     Color band_bg = (Color){30, 30, 46, 255};
-    gfx_rect_rounded(sx, up_y,   total, L.band_h, L.band_h / 4, band_bg);
-    gfx_rect_rounded(sx, down_y, total, L.band_h, L.band_h / 4, band_bg);
+    rect_rounded_px(sx, up_y,   total, L.band_h, L.band_h / 4, band_bg);
+    rect_rounded_px(sx, down_y, total, L.band_h, L.band_h / 4, band_bg);
     draw_slot_char(alpha_step(alphabet, slots[cursor],  1), cur_x + L.slot_w / 2,
                    up_y + (L.band_h - band_fs) / 2, band_fs, SLOT_LABEL);
     draw_slot_char(alpha_step(alphabet, slots[cursor], -1), cur_x + L.slot_w / 2,
@@ -362,7 +344,7 @@ void draw_picker_panel(PickerLayout L, const char* title, const char* slots,
     for (int i = 0; i < n; i++) {
         int x = sx + i * (L.slot_w + L.slot_gap);
         bool active = (i == cursor);
-        gfx_rect_rounded(x, L.slots_y, L.slot_w, L.slot_h, L.slot_w / 6,
+        rect_rounded_px(x, L.slots_y, L.slot_w, L.slot_h, L.slot_w / 6,
                          active ? (Color){40, 40, 60, 255} : (Color){24, 24, 34, 255});
         gfx_rect_lines(x, L.slots_y, L.slot_w, L.slot_h, active ? ACCENT : CARD_EDGE);
         draw_slot_char(slots[i], x + L.slot_w / 2,
@@ -402,74 +384,13 @@ void draw_picker_panel(PickerLayout L, const char* title, const char* slots,
 
 // --- Lifecycle -------------------------------------------------------------
 void render_init(void) {
-#if defined(PLATFORM_IOS)
-    // iOS: UIKit owns the window/surface and drives the loop (CADisplayLink); the
-    // Metal layer is attached separately by the app shell. Nothing to do here.
-#else
-#if defined(PLATFORM_ANDROID)
-    // Request immersive fullscreen so the app draws under the status bar / camera
-    // cutout (paired with windowLayoutInDisplayCutoutMode=shortEdges in the theme)
-    // — otherwise the surface is letterboxed below the status bar.
-    SetConfigFlags(FLAG_FULLSCREEN_MODE);
-#elif defined(PLATFORM_WEB)
-    // Let the GL canvas follow the browser viewport (the HTML shell sizes it);
-    // GetScreenWidth/Height then track it so the layout re-fits on resize/rotate.
-    SetConfigFlags(FLAG_WINDOW_RESIZABLE);
-#else
-    // Desktop native: a freely resizable window (minimum 640x480, enforced
-    // below) whose 640x480 layout scales up to fill it at native resolution;
-    // MSAA keeps the scaled vector edges clean.
-    SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
-#endif
-#if defined(PLATFORM_ANDROID)
-    // Request 0x0: raylib's Android backend then renders at the device's native
-    // resolution. Any fixed size here gets aspect-letterboxed into the display
-    // (with GetScreenWidth/Height reporting the request, not the device), which
-    // would shrink the whole game into a 640x480 box in the middle of the screen.
-    InitWindow(0, 0, "openrackem");
-#else
-    // Fixed 640x480 window (not resizable); Alt+Enter toggles fullscreen.
-    InitWindow(BASE_WIDTH, BASE_HEIGHT, "openrackem");
-#endif
-    SetExitKey(KEY_NULL); // Escape is handled by the game, not the window
-#if !defined(PLATFORM_ANDROID) && !defined(PLATFORM_WEB)
-    SetWindowMinSize(BASE_WIDTH, BASE_HEIGHT); // never render below 640x480
-#endif
-    SetTargetFPS(60);
-    gfx_font_init();      // load the bundled UI font now that the GL context exists
-
-#ifdef OR_LANDSCAPE
-    canvas = LoadRenderTexture(BASE_WIDTH, BASE_HEIGHT);
-#endif
-#endif // PLATFORM_IOS
+    window_init(GAME_NAME);
+    present_init();
 }
-
-void render_toggle_fullscreen(void) {
-#if defined(PLATFORM_ANDROID) || defined(PLATFORM_IOS)
-    // Android / iOS apps are always fullscreen; nothing to toggle.
-    (void)0;
-}
-#else
-    // Borderless fullscreen at the monitor's resolution; present() integer-
-    // scales and centers the fixed canvas inside it.
-    if (!IsWindowFullscreen()) {
-        int mon = GetCurrentMonitor();
-        SetWindowSize(GetMonitorWidth(mon), GetMonitorHeight(mon));
-        ToggleFullscreen();
-    } else {
-        ToggleFullscreen();
-        SetWindowSize(BASE_WIDTH, BASE_HEIGHT);
-    }
-}
-#endif // PLATFORM_ANDROID / PLATFORM_IOS
 
 void render_cleanup(void) {
-#ifdef OR_LANDSCAPE
-    UnloadRenderTexture(canvas);
-#endif
-#if !defined(PLATFORM_IOS)
-    CloseWindow();
-#endif
+    present_cleanup();
+    window_close();
 }
 
 // --- Public entry points ---------------------------------------------------
@@ -487,24 +408,10 @@ void render_frame(const Game* game, const TableUi* ui) { OR_DISPATCH(render_fram
 void render_pause(const Game* game, const TableUi* ui) { OR_DISPATCH(render_pause, game, ui); }
 void render_menu(const char* title, const char* const* items, int count,
                  int selected, int gap_before) {
-    OR_DISPATCH(render_menu, title, items, count, selected, gap_before);
+    MenuTheme t = menu_theme();
+    menu_show(&t, title, items, count, selected, gap_before);
 }
 void render_picker(const char* title, const char* slots, int cursor,
                    const char* alphabet, const char* hint, const char* ok_label) {
     OR_DISPATCH(render_picker, title, slots, cursor, alphabet, hint, ok_label);
-}
-
-int render_menu_hit_test(Vector2 p) {
-    for (int i = 0; i < s_menu_item_count; i++) {
-        if (CheckCollisionPointRec(p, s_menu_item_rects[i])) return i;
-    }
-    return -1;
-}
-
-bool render_window_should_close(void) {
-    return WindowShouldClose();
-}
-
-bool render_window_focused(void) {
-    return IsWindowFocused();
 }
