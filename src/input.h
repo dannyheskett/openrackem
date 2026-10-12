@@ -43,10 +43,10 @@ typedef struct {
     // Window
     bool fullscreen_toggle;     // Alt+Enter
 
-    // Text entry (keyboard platforms only): printable characters typed this
-    // frame and a backspace edge (with key-repeat). Screens that accept typing
-    // — the name field, the room-code field — consume these; touch leaves them
-    // empty and uses the on-screen slot picker instead.
+    // Text entry: printable characters typed this frame and a backspace edge
+    // (with key-repeat), from the physical keyboard or, on touch platforms, the
+    // native on-screen keyboard (softkbd.h). Screens that accept typing — the
+    // name field, the room-code field — consume these.
     char    text_input[8];      // NUL-terminated chars entered this frame
     uint8_t text_len;
     bool    backspace_pressed;

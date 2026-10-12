@@ -6,6 +6,7 @@
 // empty object off OR_PORTRAIT.
 #include "render_internal.h"
 #include "safe_area.h"
+#include "softkbd.h"
 #include <stddef.h> // NULL
 #include <stdio.h>
 #include <string.h>  // strlen
@@ -698,6 +699,7 @@ void render_pause_portrait(const Game* g, const TableUi* ui) {
 // The slot picker, sized off the live screen like everything else here. Twelve
 // name slots have to fit a phone's width, so the slots themselves are modest;
 // the spinner bands and the buttons are what get the thumb-sized targets.
+// Where the device has an on-screen keyboard (softkbd.h) it does the typing.
 void render_picker_portrait(const char* title, const char* slots, int cursor,
                             const char* alphabet, const char* hint,
                             const char* ok_label) {
@@ -714,7 +716,10 @@ void render_picker_portrait(const char* title, const char* slots, int cursor,
     if (slot_w > base / 6) slot_w = base / 6;   // few slots shouldn't sprawl
     int slot_h  = slot_w * 9 / 5;
     int slot_fs = slot_h * 3 / 5;
-    int band_h  = slot_h * 4 / 5;
+    // With the device's keyboard up the letters are typed, so the spinner
+    // bands go and the panel sits at the top, clear of the keyboard.
+    bool kbd    = softkbd_available();
+    int band_h  = kbd ? 0 : slot_h * 4 / 5;
 
     int title_size = clampi(h / 20, 14, 120);
     int hint_fs    = clampi(h / 52, 9, 44);
@@ -725,8 +730,8 @@ void render_picker_portrait(const char* title, const char* slots, int cursor,
     int panel_h = pad + title_size + pad + band_h + slot_h + band_h + pad
                 + hint_fs + pad + btn_h + pad;
     int px = w / 2 - panel_w / 2;
-    int py = (h - panel_h) / 2;
     int tb = top_bar_h(h);
+    int py = kbd ? tb + pad : (h - panel_h) / 2;
     if (py < tb + pad) py = tb + pad;
 
     PickerLayout L = {
