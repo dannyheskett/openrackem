@@ -7,17 +7,23 @@
 # internal port and trusts the Fly-Client-IP header for rate limiting.
 #
 # Game state lives in ONE machine's memory (fixed pools: 1024 rooms, 2048
-# connections, a few tens of MB total), so this app must never scale out and
-# never auto-stop: a second machine would split the room table (create-on-A
-# can't be joined-on-B; the quick queue would fragment), and a stop would end
-# every live game. A deploy replaces the machine and does end live tables —
-# ship server updates in quiet hours; clients just start new games.
+# connections, a few tens of MB total), so this app must never scale out: a
+# second machine would split the room table (create-on-A can't be
+# joined-on-B; the quick queue would fragment). A deploy replaces the machine
+# and does end live tables — ship server updates in quiet hours; clients just
+# start new games.
+#
+# The machine SUSPENDS when idle and wakes on the next connection. Fly's proxy
+# suspends it only when no connection is open, and a WebSocket stays open for
+# a whole game, so a live table keeps it awake. Suspend (not stop) snapshots
+# the machine's memory, so the room table survives a suspend and a seat token
+# still rejoins after it. Never use auto_stop_machines = "stop": a stop is a
+# cold boot and ends every live game.
 #
 # DEPLOY WITH:  fly deploy --ha=false
 # Plain `fly deploy` provisions a SECOND machine for zero-downtime HA, which
 # breaks the single-machine invariant above. --ha=false keeps it at one; if a
-# second ever appears, `fly scale count 1`. min_machines_running=1 +
-# auto_stop=off below keep that one always live.
+# second ever appears, `fly scale count 1`.
 app = "openrackem-server"
 primary_region = "ewr"
 
@@ -27,9 +33,9 @@ primary_region = "ewr"
 [http_service]
   internal_port = 8080
   force_https = true
-  auto_stop_machines = "off"
+  auto_stop_machines = "suspend"
   auto_start_machines = true
-  min_machines_running = 1
+  min_machines_running = 0
 
   [[http_service.checks]]
     interval = "30s"

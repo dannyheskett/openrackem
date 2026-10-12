@@ -46,6 +46,19 @@ int     GetScreenWidth(void)       { return 450; }
 int     GetScreenHeight(void)      { return 800; }
 bool    render_use_portrait(void)  { return fake_portrait; }
 
+// The on-screen keyboard's queue (softkbd.h): tests script the events it
+// delivers; input.c drains them in order.
+static int fake_kbd[32];
+static int fake_kbd_len, fake_kbd_pos;
+int softkbd_poll(void) {
+    return (fake_kbd_pos < fake_kbd_len) ? fake_kbd[fake_kbd_pos++] : SOFTKBD_NONE;
+}
+static void kbd_script(const int* evs, int n) {
+    for (int i = 0; i < n; i++) fake_kbd[i] = evs[i];
+    fake_kbd_len = n;
+    fake_kbd_pos = 0;
+}
+
 #define DT (1.0 / 60.0)
 // 450x800 screen => tap movement tolerance 450/25 = 18 px.
 #define TOL 18
@@ -57,6 +70,8 @@ static void reset(void) {
     fake_np       = 0;
     fake_gesture  = 0;
     fake_portrait = true;
+    fake_kbd_len  = fake_kbd_pos = 0;
+    s_kbd_pending = SOFTKBD_NONE;
 }
 
 // Advance one 60 Hz frame and poll with the fingers currently set.
@@ -194,9 +209,52 @@ static void test_landscape_ignores_touch(void) {
     CHECK(!in.touch_tap && !in.any_pressed && !in.escape_pressed);
 }
 
+// --- On-screen keyboard events reach the text fields, in order ---------------
+static void test_softkbd_chars_and_done(void) {
+    reset();
+    kbd_script((const int[]){'D', 'a', 'n'}, 3);
+    Input in = frame();
+    CHECK(in.text_len == 3 && strcmp(in.text_input, "Dan") == 0);
+    CHECK(!in.backspace_pressed && !in.confirm_pressed);
+
+    // Done confirms (it saves the name / joins the room).
+    kbd_script((const int[]){SOFTKBD_DONE}, 1);
+    in = frame();
+    CHECK(in.confirm_pressed && in.select_pressed && in.text_len == 0);
+}
+
+static void test_softkbd_keeps_order(void) {
+    reset();
+    // "AB", backspace, "C": the backspace must not apply before A and B land,
+    // nor a second backspace collapse into the first.
+    kbd_script((const int[]){'A', 'B', SOFTKBD_BACKSPACE, SOFTKBD_BACKSPACE, 'C'}, 5);
+    Input in = frame();
+    CHECK(strcmp(in.text_input, "AB") == 0 && !in.backspace_pressed);
+    in = frame();
+    CHECK(in.text_len == 0 && in.backspace_pressed);
+    in = frame();
+    CHECK(in.text_len == 0 && in.backspace_pressed);
+    in = frame();
+    CHECK(strcmp(in.text_input, "C") == 0 && !in.backspace_pressed);
+    in = frame();
+    CHECK(in.text_len == 0 && !in.backspace_pressed);
+}
+
+static void test_softkbd_overflow_and_non_ascii(void) {
+    reset();
+    // More than a frame's worth of characters spills into the next frame, and
+    // a non-ASCII character arrives as a placeholder that is no letter.
+    kbd_script((const int[]){'1', '2', '3', '4', '5', '6', '7', '8', 0x141}, 9);
+    Input in = frame();
+    CHECK(in.text_len == 7 && strcmp(in.text_input, "1234567") == 0);
+    in = frame();
+    CHECK(strcmp(in.text_input, "8?") == 0);
+}
+
 int main(void) {
     printf("test_input: touch recognizer — tap on release, long press, drag,\n");
-    printf("            two-finger tap, finger-jump, swipes, landscape gating\n");
+    printf("            two-finger tap, finger-jump, swipes, landscape gating,\n");
+    printf("            on-screen keyboard events\n");
     test_tap_on_release();
     test_long_press_is_not_a_tap();
     test_drag_is_not_a_tap();
@@ -204,6 +262,9 @@ int main(void) {
     test_second_finger_jump_not_a_drag();
     test_swipes_move_menu();
     test_landscape_ignores_touch();
+    test_softkbd_chars_and_done();
+    test_softkbd_keeps_order();
+    test_softkbd_overflow_and_non_ascii();
     if (failures == 0) {
         printf("OK: all checks passed\n");
         return 0;

@@ -330,16 +330,20 @@ void draw_picker_panel(PickerLayout L, const char* title, const char* slots,
     // obvious way to advance — the swipe these replace was invisible and
     // unguessable. The strip spans the whole slot row because that is exactly
     // the rectangle captured below: what you see is what you can hit.
+    // A zero band height means no bands (the device's keyboard does the typing).
+    bool bands  = L.band_h > 0;
     int band_fs = L.slot_fs * 4 / 5;
     int up_y    = L.slots_y - L.band_h;
     int down_y  = L.slots_y + L.slot_h;
-    Color band_bg = (Color){30, 30, 46, 255};
-    rect_rounded_px(sx, up_y,   total, L.band_h, L.band_h / 4, band_bg);
-    rect_rounded_px(sx, down_y, total, L.band_h, L.band_h / 4, band_bg);
-    draw_slot_char(alpha_step(alphabet, slots[cursor],  1), cur_x + L.slot_w / 2,
-                   up_y + (L.band_h - band_fs) / 2, band_fs, SLOT_LABEL);
-    draw_slot_char(alpha_step(alphabet, slots[cursor], -1), cur_x + L.slot_w / 2,
-                   down_y + (L.band_h - band_fs) / 2, band_fs, SLOT_LABEL);
+    if (bands) {
+        Color band_bg = (Color){30, 30, 46, 255};
+        rect_rounded_px(sx, up_y,   total, L.band_h, L.band_h / 4, band_bg);
+        rect_rounded_px(sx, down_y, total, L.band_h, L.band_h / 4, band_bg);
+        draw_slot_char(alpha_step(alphabet, slots[cursor],  1), cur_x + L.slot_w / 2,
+                       up_y + (L.band_h - band_fs) / 2, band_fs, SLOT_LABEL);
+        draw_slot_char(alpha_step(alphabet, slots[cursor], -1), cur_x + L.slot_w / 2,
+                       down_y + (L.band_h - band_fs) / 2, band_fs, SLOT_LABEL);
+    }
 
     for (int i = 0; i < n; i++) {
         int x = sx + i * (L.slot_w + L.slot_gap);
@@ -371,10 +375,12 @@ void draw_picker_panel(PickerLayout L, const char* title, const char* slots,
     if (capture) {
         // Bands span the whole slot row's width so the target is a comfortable
         // strip rather than one slot-wide column.
-        pick_capture(PICK_NEXT, (Rectangle){(float)sx, (float)up_y,
-                                            (float)total, (float)L.band_h});
-        pick_capture(PICK_PREV, (Rectangle){(float)sx, (float)down_y,
-                                            (float)total, (float)L.band_h});
+        if (bands) {
+            pick_capture(PICK_NEXT, (Rectangle){(float)sx, (float)up_y,
+                                                (float)total, (float)L.band_h});
+            pick_capture(PICK_PREV, (Rectangle){(float)sx, (float)down_y,
+                                                (float)total, (float)L.band_h});
+        }
         pick_capture(PICK_OK,     (Rectangle){(float)bx0, (float)L.btn_y,
                                               (float)L.btn_w, (float)L.btn_h});
         pick_capture(PICK_CANCEL, (Rectangle){(float)bx1, (float)L.btn_y,

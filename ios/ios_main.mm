@@ -8,16 +8,78 @@
 #import "or_types.h"
 #import "gfx_metal.h"
 #import "plat_ios.h"
+#import "softkbd.h"
 
-@interface MetalView : UIView
+// The Metal view doubles as the keyboard's text target (UIKeyInput): while a
+// text-entry screen is up it becomes first responder, which raises the system
+// keyboard, and what the player types is queued for the game (softkbd.h).
+@interface MetalView : UIView <UIKeyInput>
+@property (nonatomic) UIKeyboardType keyboardType;
+@property (nonatomic) UITextAutocapitalizationType autocapitalizationType;
+@property (nonatomic) UITextAutocorrectionType autocorrectionType;
+@property (nonatomic) UITextSpellCheckingType spellCheckingType;
+@property (nonatomic) UITextSmartQuotesType smartQuotesType;
+@property (nonatomic) UITextSmartDashesType smartDashesType;
+@property (nonatomic) UITextSmartInsertDeleteType smartInsertDeleteType;
+@property (nonatomic) UIReturnKeyType returnKeyType;
+@property (nonatomic) BOOL wantsKeyboard;
 @property (nonatomic) BOOL started;
 @property (nonatomic) NSInteger originX; // safe-area left inset, pixels
 @property (nonatomic) NSInteger originY; // safe-area top inset, pixels
 @end
 
+// The one game view, for the keyboard call the C side makes (main thread).
+static __weak MetalView* s_view;
+
 @implementation MetalView
 
 + (Class)layerClass { return [CAMetalLayer class]; }
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        // Names and room codes: capitals and digits, nothing to correct.
+        _keyboardType           = UIKeyboardTypeASCIICapable;
+        _autocapitalizationType = UITextAutocapitalizationTypeAllCharacters;
+        _autocorrectionType     = UITextAutocorrectionTypeNo;
+        _spellCheckingType      = UITextSpellCheckingTypeNo;
+        _smartQuotesType        = UITextSmartQuotesTypeNo;
+        _smartDashesType        = UITextSmartDashesTypeNo;
+        _smartInsertDeleteType  = UITextSmartInsertDeleteTypeNo;
+        _returnKeyType          = UIReturnKeyDone;
+        s_view = self;
+    }
+    return self;
+}
+
+// --- Keyboard (UIKeyInput) --------------------------------------------------
+// Only a first responder while the game wants the keyboard, so a stray
+// becomeFirstResponder (e.g. on returning to the foreground) can't raise it.
+- (BOOL)canBecomeFirstResponder { return self.wantsKeyboard; }
+- (BOOL)hasText { return YES; } // so Delete always reaches us
+- (void)insertText:(NSString*)text {
+    [text enumerateSubstringsInRange:NSMakeRange(0, text.length)
+                             options:NSStringEnumerationByComposedCharacterSequences
+                          usingBlock:^(NSString* ch, NSRange r, NSRange er, BOOL* stop) {
+        (void)r; (void)er; (void)stop;
+        unichar u = [ch characterAtIndex:0];
+        softkbd_push(u == '\n' || u == '\r' ? SOFTKBD_DONE
+                     : (ch.length == 1 ? (int)u : '?'));
+    }];
+}
+- (void)deleteBackward { softkbd_push(SOFTKBD_BACKSPACE); }
+
+- (void)setKeyboardVisible:(BOOL)visible {
+    self.wantsKeyboard = visible;
+    if (visible) {
+        // Cycling first responder brings back a keyboard the player hid (the
+        // iPad's hide-keyboard key).
+        if (self.isFirstResponder) [self resignFirstResponder];
+        [self becomeFirstResponder];
+    } else if (self.isFirstResponder) {
+        [self resignFirstResponder];
+    }
+}
 
 - (void)didMoveToWindow {
     [super didMoveToWindow];
@@ -120,6 +182,10 @@
 - (void)onSwipeRight:(UISwipeGestureRecognizer*)g { (void)g; plat_ios_post_gesture(GESTURE_SWIPE_RIGHT); }
 
 @end
+
+extern "C" void plat_ios_set_keyboard(bool visible) {
+    [s_view setKeyboardVisible:visible ? YES : NO];
+}
 
 @interface AppDelegate : UIResponder <UIApplicationDelegate>
 @property (strong, nonatomic) UIWindow* window;
