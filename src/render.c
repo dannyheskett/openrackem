@@ -32,6 +32,7 @@ const Color CARD_TEXT  = { 30,  30,  40, 255};
 const Color CARD_EDGE  = { 90,  90,  90, 255};
 const Color SLOT_LABEL = {150, 156, 170, 255};
 const Color ACCENT     = {253, 249,   0, 255};   // raylib YELLOW
+const Color TURN_INK   = { 24,  24,  20, 255};   // legible on ACCENT
 
 static Color lighten(Color c, int d) {
     int r = c.r + d, g = c.g + d, b = c.b + d;
@@ -151,6 +152,15 @@ const char* seat_name(const Game* g, int seat) {
     }
     snprintf(buf[seat], sizeof buf[seat], "CPU %d", n);
     return buf[seat];
+}
+
+bool seat_is_active(const Game* g, int seat) {
+    return g->turn == seat && (g->phase == PHASE_DRAW || g->phase == PHASE_PLACE);
+}
+
+const char* turn_owner_text(const Game* g, char* buf, size_t n) {
+    snprintf(buf, n, "%s'S TURN", seat_name(g, g->turn));
+    return buf;
 }
 
 int deal_cards_for_seat(const Game* g, int seat) {
