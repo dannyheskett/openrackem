@@ -1,15 +1,23 @@
 package com.danheskett.openrackem;
 
 import android.app.NativeActivity;
+import android.content.Context;
 import android.graphics.Rect;
 import android.os.Build;
 import android.os.Bundle;
+import android.text.InputType;
 import android.view.Display;
 import android.view.DisplayCutout;
+import android.view.KeyEvent;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
+import android.view.inputmethod.BaseInputConnection;
+import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputConnection;
+import android.view.inputmethod.InputMethodManager;
 
 /**
  * NativeActivity subclass whose only job is to make the game truly immersive:
@@ -43,9 +51,29 @@ public class OpenrackemActivity extends NativeActivity {
     private native void nativeSetSafeInsets(int top, int bottom, int left, int right,
                                             int cutoutLeft, int cutoutRight);
 
+    // Implemented in native (src/softkbd.c). Register hands native this
+    // Activity so it can call setKeyboardVisible(); Event queues one keyboard
+    // event: a character, or one of the KBD_* codes below.
+    private native void nativeKbdRegister();
+    private native void nativeKbdEvent(int ev);
+    private static final int KBD_BACKSPACE = -1; // SOFTKBD_BACKSPACE
+    private static final int KBD_DONE      = -2; // SOFTKBD_DONE
+
+    private KbdView kbdView;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // NativeActivity asks for adjustResize; the name screen draws at the top
+        // instead, so the keyboard must not resize (and re-create) the surface.
+        getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING);
+        kbdView = new KbdView(this);
+        addContentView(kbdView, new ViewGroup.LayoutParams(1, 1));
+        try {
+            nativeKbdRegister();
+        } catch (Throwable t) {
+            // Without it the name screen keeps its on-screen slot picker.
+        }
         goImmersive();
         preferHighestRefreshRate();
         // Re-read the cutout whenever the window insets settle (first layout,
@@ -62,6 +90,145 @@ public class OpenrackemActivity extends NativeActivity {
         if (hasFocus) {
             goImmersive();
             pushSafeInsets();
+        }
+    }
+
+    // Called from the game thread (src/softkbd.c) when a text-entry screen opens
+    // or closes, and again when the player taps the field after dismissing the
+    // keyboard themselves.
+    public void setKeyboardVisible(final boolean visible) {
+        runOnUiThread(() -> {
+            InputMethodManager imm =
+                    (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (imm == null || kbdView == null) return;
+            if (visible) {
+                kbdView.requestFocus();
+                imm.restartInput(kbdView);
+                imm.showSoftInput(kbdView, 0);
+            } else {
+                imm.hideSoftInputFromWindow(kbdView.getWindowToken(), 0);
+                kbdView.clearFocus();
+                goImmersive(); // the keyboard can bring the system bars back
+            }
+        });
+    }
+
+    private void kbdEvent(int ev) {
+        try {
+            nativeKbdEvent(ev);
+        } catch (Throwable t) {
+            // Never let a JNI hiccup take the game down over a keystroke.
+        }
+    }
+
+    /**
+     * An invisible 1x1 view that is the keyboard's target. NativeActivity's own
+     * content view offers the keyboard no input connection, so typing would
+     * arrive (if at all) as raw key events with no characters. This one hands
+     * the keyboard a connection that forwards what it commits to native.
+     *
+     * A visible-password field, so keyboards commit each letter directly instead
+     * of composing words with suggestions. Composing is still handled for
+     * keyboards that do it anyway: each change to the composing text is sent as
+     * the backspaces and characters that turn the old text into the new.
+     */
+    private final class KbdView extends View {
+        KbdView(Context ctx) {
+            super(ctx);
+            setFocusable(true);
+            setFocusableInTouchMode(true);
+        }
+
+        @Override
+        public boolean onCheckIsTextEditor() {
+            return true;
+        }
+
+        @Override
+        public InputConnection onCreateInputConnection(EditorInfo out) {
+            out.inputType = InputType.TYPE_CLASS_TEXT
+                    | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+                    | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                    | InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS;
+            out.imeOptions = EditorInfo.IME_ACTION_DONE
+                    | EditorInfo.IME_FLAG_NO_EXTRACT_UI
+                    | EditorInfo.IME_FLAG_NO_FULLSCREEN;
+            return new KbdConnection(this);
+        }
+    }
+
+    private final class KbdConnection extends BaseInputConnection {
+        private String composing = "";
+
+        KbdConnection(View v) {
+            super(v, false);
+        }
+
+        // Send the edit that turns `from` into `to`: backspaces down to their
+        // common prefix, then the rest of `to`.
+        private void sendDiff(String from, String to) {
+            int common = 0;
+            while (common < from.length() && common < to.length()
+                    && from.charAt(common) == to.charAt(common)) {
+                common++;
+            }
+            for (int i = from.length(); i > common; i--) kbdEvent(KBD_BACKSPACE);
+            for (int i = common; i < to.length(); i++) {
+                char ch = to.charAt(i);
+                kbdEvent(ch == '\n' ? KBD_DONE : ch);
+            }
+        }
+
+        @Override
+        public boolean commitText(CharSequence text, int newCursorPosition) {
+            sendDiff(composing, text.toString());
+            composing = "";
+            return true;
+        }
+
+        @Override
+        public boolean setComposingText(CharSequence text, int newCursorPosition) {
+            String next = text.toString();
+            sendDiff(composing, next);
+            composing = next;
+            return true;
+        }
+
+        @Override
+        public boolean finishComposingText() {
+            composing = ""; // what was composed stays typed
+            return true;
+        }
+
+        @Override
+        public boolean deleteSurroundingText(int beforeLength, int afterLength) {
+            for (int i = 0; i < beforeLength; i++) kbdEvent(KBD_BACKSPACE);
+            return true;
+        }
+
+        @Override
+        public boolean sendKeyEvent(KeyEvent e) {
+            if (e.getAction() != KeyEvent.ACTION_DOWN) return true;
+            switch (e.getKeyCode()) {
+            case KeyEvent.KEYCODE_DEL:
+                kbdEvent(KBD_BACKSPACE);
+                break;
+            case KeyEvent.KEYCODE_ENTER:
+            case KeyEvent.KEYCODE_NUMPAD_ENTER:
+                kbdEvent(KBD_DONE);
+                break;
+            default:
+                int ch = e.getUnicodeChar();
+                if (ch >= 32 && ch < 127) kbdEvent(ch);
+                break;
+            }
+            return true;
+        }
+
+        @Override
+        public boolean performEditorAction(int actionCode) {
+            kbdEvent(KBD_DONE);
+            return true;
         }
     }
 

@@ -1,6 +1,7 @@
 #include "input.h"
 #include "render.h"
 #include "platform.h"
+#include "softkbd.h"
 #if !defined(PLATFORM_IOS)
 #include <raylib.h>  // keyboard/mouse; iOS is touch-only (queries come from plat_ios)
 #endif
@@ -171,6 +172,40 @@ static void poll_touch(Input* in) {
     }
 #endif
 }
+
+// On-screen keyboard source (softkbd.h): the native keyboard's characters,
+// backspace and Done key, appended to whatever the physical keyboard produced
+// so the text-entry screens can't tell the two apart. Events are taken in
+// order; one that can't be represented this frame without reordering (a second
+// backspace, a backspace after characters, a full buffer) waits for the next.
+static int s_kbd_pending = SOFTKBD_NONE;
+
+static void poll_softkbd(Input* in) {
+    for (;;) {
+        int ev = s_kbd_pending;
+        s_kbd_pending = SOFTKBD_NONE;
+        if (ev == SOFTKBD_NONE) ev = softkbd_poll();
+        if (ev == SOFTKBD_NONE) break;
+        if (ev == SOFTKBD_DONE) {
+            in->confirm_pressed = true;
+            in->select_pressed  = true;
+            break;
+        }
+        if (ev == SOFTKBD_BACKSPACE) {
+            if (in->backspace_pressed || in->text_len > 0) { s_kbd_pending = ev; break; }
+            in->backspace_pressed = true;
+            continue;
+        }
+        if (in->backspace_pressed || in->text_len >= sizeof in->text_input - 1) {
+            s_kbd_pending = ev;
+            break;
+        }
+        // Anything outside printable ASCII still counts as a keystroke (so its
+        // backspace undoes nothing) but can't alias a real letter.
+        in->text_input[in->text_len++] = (ev >= 32 && ev < 127) ? (char)ev : '?';
+        in->text_input[in->text_len] = '\0';
+    }
+}
 #endif // OR_TOUCH
 
 Input input_poll(void) {
@@ -180,6 +215,7 @@ Input input_poll(void) {
 #endif
 #ifdef OR_TOUCH
     poll_touch(&in);      // Android + iOS + web (mobile browsers)
+    poll_softkbd(&in);    // the native on-screen keyboard, while one is up
 #endif
     return in;
 }

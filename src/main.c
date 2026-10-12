@@ -20,6 +20,7 @@
 
 #include "netgame.h"
 #include "prefs.h"
+#include "softkbd.h"
 
 typedef enum {
     STATE_MENU,
@@ -215,6 +216,18 @@ static void simstats_count(double now, int steps) {
 }
 #endif // OR_SIMSTATS
 
+// Typing into a slot picker (name / room code). Each keystroke since the cursor
+// last moved is remembered as landed-in-a-slot or rejected (outside the
+// alphabet), so a backspace undoes exactly what the keystroke did: native
+// keyboards happily send spaces and punctuation, and deleting one of those must
+// not eat a real letter.
+#define TYPE_HIST 32
+typedef struct {
+    bool    tail;              // the last slot was just typed: backspace clears it in place
+    uint8_t hist[TYPE_HIST];   // 1 = landed, 0 = rejected; oldest first
+    int     hist_len;
+} TypeState;
+
 // App state carried across frames. Kept in one struct so the web build can drive
 // the loop from an emscripten per-frame callback (browsers can't block).
 typedef struct {
@@ -231,6 +244,7 @@ typedef struct {
     int code_cursor;   // active slot on the Join screen (0..5)
     char name_buf[16]; // player name being edited (STATE_NAME)
     int name_cursor;   // active slot on the Name screen (0..NAME_MAX-1)
+    TypeState typing;  // keystroke history for whichever entry screen is up
 } AppCtx;
 
 // Synthesize the acting player's Action for this frame from keyboard and
@@ -328,6 +342,7 @@ static int picker_tap(const Input* in, char* slots, int nslots, int* cursor,
     int hit = render_picker_hit_test((Vector2){in->tap_x, in->tap_y});
     if (hit >= 0 && hit < nslots) {
         *cursor = hit;
+        softkbd_reshow(); // the player may have put the keyboard away
         sound_play(SFX_MENU_MOVE);
     } else if (hit == PICK_NEXT || hit == PICK_PREV) {
         slot_cycle(&slots[*cursor], alphabet, (hit == PICK_NEXT) ? 1 : -1);
@@ -338,6 +353,53 @@ static int picker_tap(const Input* in, char* slots, int nslots, int* cursor,
         return -1;
     }
     return 0;
+}
+
+static void type_reset(TypeState* t) { memset(t, 0, sizeof *t); }
+
+// Apply this frame's typing (physical or on-screen keyboard) to `slots`:
+// letters land at the cursor and advance it; backspace steps back and clears.
+// Lowercase is folded up. `blank` is what a cleared slot holds.
+static void type_into(TypeState* t, const Input* in, char* slots, int n, int* cursor,
+                      const char* alphabet, char blank) {
+    for (int i = 0; i < in->text_len; i++) {
+        char ch = in->text_input[i];
+        if (ch >= 'a' && ch <= 'z') ch = (char)(ch - 'a' + 'A');
+        bool ok = (ch != ' ' && strchr(alphabet, ch) != NULL);
+        if (t->hist_len == TYPE_HIST) { // forget the oldest keystroke
+            memmove(t->hist, t->hist + 1, TYPE_HIST - 1);
+            t->hist_len--;
+        }
+        t->hist[t->hist_len++] = ok;
+        if (!ok) continue;
+        slots[*cursor] = ch;
+        if (*cursor < n - 1) (*cursor)++;
+        else t->tail = true;
+        sound_play(SFX_MENU_MOVE);
+    }
+    if (in->backspace_pressed) {
+        if (t->hist_len > 0 && !t->hist[--t->hist_len]) return; // nothing landed
+        if (t->tail) {
+            t->tail = false;
+        } else if (*cursor > 0) {
+            (*cursor)--;
+        }
+        slots[*cursor] = blank;
+    }
+}
+
+// Anything that moves the cursor or changes a slot by hand makes the keystroke
+// history meaningless.
+static void type_maybe_reset(TypeState* t, const Input* in) {
+    if (in->touch_tap || in->menu_left || in->menu_right || in->menu_up || in->menu_down)
+        type_reset(t);
+}
+
+// The picker's hint line: how to edit on this device.
+static const char* picker_hint(void) {
+    if (softkbd_available()) return "TYPE, OR TAP A SLOT TO MOVE THE CURSOR";
+    if (!render_use_portrait()) return "TYPE, OR USE THE ARROW KEYS";
+    return "TAP A SLOT, THEN THE LETTER ABOVE OR BELOW IT";
 }
 
 // A menu row picked by the pointer: a completed tap, or a mouse click.
@@ -380,21 +442,10 @@ static int join_screen(AppCtx* c, const Input* in) {
         for (int i = 0; i < 6; i++) c->join_code[i] = 'A';
         c->join_code[6] = '\0';
     }
-    // Keyboard: type the code directly (case-insensitive, filtered to the
-    // room-code alphabet); backspace steps back. Coexists with the slot picker.
-    for (int i = 0; i < in->text_len; i++) {
-        char ch = in->text_input[i];
-        if (ch >= 'a' && ch <= 'z') ch = (char)(ch - 'a' + 'A');
-        if (strchr(CODE_ALPHABET, ch)) {
-            c->join_code[c->code_cursor] = ch;
-            if (c->code_cursor < 5) c->code_cursor++;
-            sound_play(SFX_MENU_MOVE);
-        }
-    }
-    if (in->backspace_pressed) {
-        if (c->code_cursor > 0) c->code_cursor--;
-        c->join_code[c->code_cursor] = 'A';
-    }
+    // Keyboard (physical or on-screen): type the code directly, filtered to
+    // the room-code alphabet. Coexists with the slot picker.
+    type_maybe_reset(&c->typing, in);
+    type_into(&c->typing, in, c->join_code, 6, &c->code_cursor, CODE_ALPHABET, 'A');
     if (in->menu_left)  c->code_cursor = (c->code_cursor + 5) % 6;
     if (in->menu_right) c->code_cursor = (c->code_cursor + 1) % 6;
     if (in->menu_up || in->menu_down) {
@@ -418,7 +469,11 @@ static void name_edit_begin(AppCtx* c) {
     int len = (int)strlen(nm);
     for (int i = 0; i < NAME_MAX; i++) c->name_buf[i] = (i < len) ? nm[i] : ' ';
     c->name_buf[NAME_MAX] = '\0';
-    c->name_cursor = 0;
+    // Start after the existing name, so typing appends and backspace deletes
+    // from its end, as in any text field.
+    c->name_cursor = (len < NAME_MAX) ? len : NAME_MAX - 1;
+    type_reset(&c->typing);
+    c->typing.tail = (len >= NAME_MAX);
 }
 
 static void name_edit_save(const AppCtx* c) {
@@ -433,25 +488,15 @@ static void name_edit_save(const AppCtx* c) {
     prefs_save();
 }
 
-// The Name screen: keyboard types alphanumerics into the slots (backspace
-// deletes); touch taps a slot to select it, taps the spinner bands to cycle its
-// letter, and taps SAVE / CANCEL to leave (swipes still work). Returns 1 to
-// save+exit, -1 to cancel, 0 to stay.
+// The Name screen: the keyboard (physical, or the device's own on-screen one)
+// types alphanumerics into the slots and backspace deletes; a tap on a slot
+// moves the cursor there, and SAVE / CANCEL (or the keyboard's Done) leave.
+// Without an on-screen keyboard the spinner bands cycle the active letter.
+// Returns 1 to save+exit, -1 to cancel, 0 to stay.
 static int name_screen(AppCtx* c, const Input* in) {
     if (in->escape_pressed) return -1;
-    for (int i = 0; i < in->text_len; i++) {
-        char ch = in->text_input[i];
-        if (ch >= 'a' && ch <= 'z') ch = (char)(ch - 'a' + 'A');
-        if (ch != ' ' && strchr(NAME_ALPHABET, ch)) {
-            c->name_buf[c->name_cursor] = ch;
-            if (c->name_cursor < NAME_MAX - 1) c->name_cursor++;
-            sound_play(SFX_MENU_MOVE);
-        }
-    }
-    if (in->backspace_pressed) {
-        if (c->name_cursor > 0) c->name_cursor--;
-        c->name_buf[c->name_cursor] = ' ';
-    }
+    type_maybe_reset(&c->typing, in);
+    type_into(&c->typing, in, c->name_buf, NAME_MAX, &c->name_cursor, NAME_ALPHABET, ' ');
     if (in->menu_left)  c->name_cursor = (c->name_cursor + NAME_MAX - 1) % NAME_MAX;
     if (in->menu_right) c->name_cursor = (c->name_cursor + 1) % NAME_MAX;
     if (in->menu_up || in->menu_down) {
@@ -769,8 +814,8 @@ static void frame_step(void* arg) {
             for (int i = 0; i < 6; i++) c->join_code[i] = 'A';
             c->join_code[6] = '\0';
             c->code_cursor = 0;
+            type_reset(&c->typing);
             c->state = STATE_ONLINE_JOIN;
-            c->code_cursor = 0;
             sound_play(SFX_MENU_SELECT);
         } else if (oc >= 0) {
             NgJoin j = (oc == ONL_CREATE) ? NG_JOIN_CREATE : NG_JOIN_QUICK;
@@ -833,6 +878,9 @@ static void frame_step(void* arg) {
     }
     }
 
+    // The device's keyboard is up exactly while a text-entry screen is.
+    softkbd_set_visible(c->state == STATE_NAME || c->state == STATE_ONLINE_JOIN);
+
     // Online opponents show their chosen names (server handles); offline seats
     // fall back to "CPU N".
     if (c->state == STATE_ONLINE && c->net.have_game)
@@ -851,14 +899,14 @@ static void frame_step(void* arg) {
         render_menu("OPTIONS", opt_labels, opt_count, c->selected, OPT_BACK);
     } else if (c->state == STATE_NAME) {
         render_picker("YOUR NAME", c->name_buf, c->name_cursor, NAME_ALPHABET,
-                      "TAP A SLOT, THEN THE LETTER ABOVE OR BELOW IT", "SAVE");
+                      picker_hint(), "SAVE");
     } else if (c->state == STATE_PAUSED) {
         render_pause(c->game, &c->ui);
     } else if (c->state == STATE_ONLINE_MENU || c->state == STATE_ONLINE) {
         render_online(c);
     } else if (c->state == STATE_ONLINE_JOIN) {
         render_picker("JOIN BY CODE", c->join_code, c->code_cursor, CODE_ALPHABET,
-                      "TAP A SLOT, THEN THE LETTER ABOVE OR BELOW IT", "JOIN");
+                      picker_hint(), "JOIN");
     } else {
         render_frame(c->game, &c->ui);
     }
