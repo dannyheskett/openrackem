@@ -66,16 +66,23 @@ static Rectangle slot_rect(int s) {
                        CARD_W, CARD_H};
 }
 
+// The left column lists every seat in turn order, you included. An opponent's
+// block holds a strip of card backs; yours is just the name line, since your
+// rack is the centre column. Returns the top of `seat`'s block.
+#define SEAT_BLOCK_H 64
+#define SELF_BLOCK_H 32
+static int seat_block_y(const Game* g, int seat) {
+    int focus = focus_seat(g);
+    int y = RACK_Y + 4;
+    for (int s = 0; s < seat; s++) y += (s == focus) ? SELF_BLOCK_H : SEAT_BLOCK_H;
+    return y;
+}
+
 // A small card footprint at an opponent's left-column block, used as the
 // flight endpoint for their exchanges. Deliberately the block, not a slot:
 // which slot an opponent filled is information the table doesn't show.
 static Rectangle opp_card_rect(const Game* g, int seat) {
-    int focus = focus_seat(g);
-    int bi = 0;
-    for (int s = 0; s < seat; s++) {
-        if (s != focus) bi++;
-    }
-    int oy = RACK_Y + 4 + bi * 64;
+    int oy = seat_block_y(g, seat);
     return (Rectangle){LEFT_X + 62, (float)(oy + 14), 26, 20};
 }
 
@@ -160,23 +167,27 @@ static void draw_table_landscape(const Game* game, const TableUi* ui) {
         }
     }
 
-    // Left: the other seats — name, running score, a strip of card backs.
-    int oy = RACK_Y + 4;
+    // Left: every seat in turn order, you included — name, running score,
+    // and for opponents a strip of card backs. The seat whose turn it is gets
+    // a solid accent bar behind its name, not just an outline.
     for (int s = 0; s < game->rules.player_count; s++) {
-        if (s == focus) continue;
-        bool their_turn = (game->turn == s &&
-                           (game->phase == PHASE_DRAW || game->phase == PHASE_PLACE));
-        if (their_turn) {
-            gfx_rect_lines(LEFT_X - 4, oy - 4, 156, 52, ACCENT);
+        int oy = seat_block_y(game, s);
+        bool me = (s == focus);
+        bool active = seat_is_active(game, s);
+        int block_h = (me ? SELF_BLOCK_H : SEAT_BLOCK_H) - 12;
+        if (active) {
+            gfx_rect(LEFT_X - 4, oy - 4, 156, 20, ACCENT);
+            gfx_rect_lines(LEFT_X - 4, oy - 4, 156, block_h, ACCENT);
         }
-        gfx_text(seat_name(game, s), LEFT_X, oy, 12, their_turn ? ACCENT : WHITE);
+        gfx_text(seat_name(game, s), LEFT_X, oy, 12, active ? TURN_INK : WHITE);
         snprintf(buf, sizeof buf, "%d", game->players[s].score);
-        gfx_text(buf, LEFT_X + 148 - gfx_measure_text(buf, 12), oy, 12, YELLOW);
+        gfx_text(buf, LEFT_X + 148 - gfx_measure_text(buf, 12), oy, 12,
+                 active ? TURN_INK : YELLOW);
+        if (me) continue;
         int backs = deal_cards_for_seat(game, s);
         for (int i = 0; i < backs; i++) {
             draw_card(LEFT_X + i * 14, oy + 18, 13, 20, 0, false, false);
         }
-        oy += 64;
     }
 
     // Right: stock, discard, the held card, then match state. While a card is
@@ -243,13 +254,14 @@ static void draw_table_landscape(const Game* game, const TableUi* ui) {
     gfx_text(buf, RIGHT_X, sy, 12, SLOT_LABEL);
     sy += 22;
 
+    // Whose turn, at a size that reads at a glance: yours in the accent
+    // colour, anyone else's in plain white.
     if (game->phase == PHASE_DEAL) {
-        gfx_text("DEALING...", RIGHT_X, sy, 12, GRAY);
+        gfx_text("DEALING...", RIGHT_X, sy, 16, GRAY);
     } else if (human_turn) {
-        gfx_text("YOUR TURN", RIGHT_X, sy, 12, ACCENT);
+        gfx_text("YOUR TURN", RIGHT_X, sy, 20, ACCENT);
     } else {
-        snprintf(buf, sizeof buf, "%s THINKING", seat_name(game, game->turn));
-        gfx_text(buf, RIGHT_X, sy, 12, GRAY);
+        gfx_text(turn_owner_text(game, buf, sizeof buf), RIGHT_X, sy, 16, WHITE);
     }
 
     // 2-player rule reminder: an ascending rack also needs a run of 3 consecutive

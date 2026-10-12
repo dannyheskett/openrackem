@@ -10,6 +10,7 @@
 
 #include "render.h"
 #include "gfx.h"
+#include <stddef.h> // size_t
 
 // Table palette (defined in render.c), shared by both renderers.
 extern const Color TABLE_BG;      // felt background
@@ -19,6 +20,7 @@ extern const Color CARD_TEXT;     // card number
 extern const Color CARD_EDGE;     // card outline
 extern const Color SLOT_LABEL;    // the 5..50 rack labels
 extern const Color ACCENT;        // cursor / current-turn highlight
+extern const Color TURN_INK;      // type drawn on the accent-filled turn bar
 
 // Shared draw helpers (defined in render.c).
 // A card at (x, y, w, h): face up shows its number, face down shows the back
@@ -38,6 +40,14 @@ void draw_mini_rack(int x, int y, int cw, int ch, const Rack* rack, bool face_up
 // Seat display name: "YOU" for the human seat, "CPU n" otherwise. Returns a
 // static buffer valid until the next call for that seat.
 const char* seat_name(const Game* g, int seat);
+
+// Whether `seat` is the one acting right now: drawing or placing. False while
+// dealing and on the round / match screens, when nobody's turn is running.
+bool seat_is_active(const Game* g, int seat);
+
+// Whose turn it is, for the status line when it isn't the human's: "CPU 2'S
+// TURN", or an online player's name. Written into `buf`, which is returned.
+const char* turn_owner_text(const Game* g, char* buf, size_t n);
 
 // Deal-animation progress: how many of `seat`'s cards have visibly arrived
 // (they land in slot #50 first, downward), and whether the first discard has

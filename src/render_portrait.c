@@ -1,6 +1,6 @@
 // Portrait (touch) renderer: adaptive layout drawn straight to the screen at
 // the device's real resolution — the OPENRACKEM title bar pinned top, a
-// compact opponents band beneath it, the ten rack slots filling the middle at
+// compact seats band beneath it, the ten rack slots filling the middle at
 // the largest row height that fits, and the stock/discard band fixed at the
 // bottom within the safe area, which is where the thumb is. Compiles to an
 // empty object off OR_PORTRAIT.
@@ -96,13 +96,13 @@ static void draw_title_bar(void) {
 // Two columns, but only one of them holds cards. The rack keeps its full ten
 // slots in a single descending strip, because that IS the game -- reading it
 // top to bottom is how you check whether it is in order, and folding it in
-// half broke that. Everything else -- opponents, the running score, the
+// half broke that. Everything else -- the seats, the running score, the
 // instruction, and the three piles -- moves into a narrower column beside it,
 // which is what buys the strip its width back.
 typedef struct {
     int m;                              // outer margin
     int side_x, side_w;                 // the mechanics column
-    int opp_y, opp_h, opp_fs, opp_row;  // opponents: one row each, in the side
+    int opp_y, opp_h, opp_fs, opp_row;  // every seat, you included: one row each
     int stats_y, stats_fs;              // points / round / run
     int status_y, status_fs, status_lh; // the instruction, wrapped to the side
     // The rack: one column of ten. `label_fs` sizes the slot number, which
@@ -184,11 +184,11 @@ static void portrait_layout(const Game* game, PortraitLayout* L) {
     L->label_fs  = clampi(L->card_h / 4, 9, 72);
 
     // Type in the side column is sized to ITS width, not the screen's.
-    int nopp   = game->rules.player_count - 1;
+    int nseats = game->rules.player_count;
     L->opp_fs  = clampi(h / 44, 10, 56);
     L->opp_row = L->opp_fs * 3 / 2;
     L->opp_y   = rack_top;
-    L->opp_h   = (nopp > 0) ? nopp * L->opp_row : 0;
+    L->opp_h   = nseats * L->opp_row;
 
     // Piles stack at the bottom of the side column, where the thumb is.
     L->pile_label_fs = clampi(h / 56, 9, 44);
@@ -204,10 +204,11 @@ static void portrait_layout(const Game* game, PortraitLayout* L) {
     // narrow column costs it size only when a single WORD would overflow.
     L->status_fs = clampi(h / 38, 9, 76);
     L->status_lh = L->status_fs * 5 / 4;
-    // Centred in whatever is left between the opponents and the pile stack.
+    // Centred in whatever is left between the seats and the pile stack.
     int gap_top    = L->opp_y + L->opp_h + m;
     int gap_bottom = L->pile_y - 2 * L->pile_step - L->pile_label_fs - m;
-    int block_h    = L->stats_fs + 6 + L->status_lh * 2;
+    // Room for the turn heading plus a two-line instruction.
+    int block_h    = L->stats_fs + 6 + L->status_lh * 3;
     L->stats_y  = gap_top + (gap_bottom - gap_top - block_h) / 2;
     if (L->stats_y < gap_top) L->stats_y = gap_top;
     L->status_y = L->stats_y + L->stats_fs + 6;
@@ -217,7 +218,8 @@ static void portrait_layout(const Game* game, PortraitLayout* L) {
 // used to sit there: dim and static normally, cycling in the accent colour
 // while that seat is deciding. This is the whole of what those ten backs
 // actually communicated -- whose turn it is -- since a rack is never revealed
-// until the round ends.
+// until the round ends. The active seat's row is filled with the accent
+// colour, so there the dots cycle in dark ink instead.
 static void draw_thinking_dots(int x, int cy, int fs, bool active) {
     int d = fs / 4;
     if (d < 3) d = 3;
@@ -226,8 +228,8 @@ static void draw_thinking_dots(int x, int cy, int fs, bool active) {
     // display link is pacing us.
     int lit = active ? (int)(GetTime() * 3.0) % 3 : -1;
     for (int i = 0; i < 3; i++) {
-        Color c = (i == lit) ? ACCENT
-                : active     ? (Color){120, 120,  90, 255}
+        Color c = (i == lit) ? TURN_INK
+                : active     ? (Color){140, 120,  40, 255}
                              : (Color){ 70,  90,  80, 255};
         rect_rounded_px(x + i * (d + gap), cy - d / 2, d, d, d / 2, c);
     }
@@ -295,37 +297,41 @@ static void draw_table_portrait(const Game* game, const TableUi* ui) {
                                      r.x + r.width, (float)L.row});
     }
 
-    // --- Side column: opponents -------------------------------------------
-    int nopp = game->rules.player_count - 1;
-    if (nopp > 0) {
-        int bi = 0;
-        for (int s = 0; s < game->rules.player_count; s++) {
-            if (s == focus) continue;
-            int by = L.opp_y + bi * L.opp_row;
-            int ty = by + (L.opp_row - L.opp_fs) / 2;
-            bool their_turn = (game->turn == s &&
-                               (game->phase == PHASE_DRAW || game->phase == PHASE_PLACE));
-            if (their_turn) {
-                gfx_rect_lines(L.side_x - 4, by, L.side_w + 8, L.opp_row, ACCENT);
-            }
-            snprintf(buf, sizeof buf, "%d", game->players[s].score);
-            int score_w = gfx_measure_text(buf, L.opp_fs);
-            gfx_text(buf, L.side_x + L.side_w - score_w, ty, L.opp_fs, YELLOW);
-
-            int dots_w = L.opp_fs;
-            draw_thinking_dots(L.side_x + L.side_w - score_w - dots_w - L.opp_fs / 3,
-                               by + L.opp_row / 2, L.opp_fs, their_turn);
-
-            // Names are player-chosen online, so shrink one that would run into
-            // the dots rather than letting it overlap them.
-            const char* nm = seat_name(game, s);
-            int room = L.side_w - score_w - dots_w - L.opp_fs;
-            int nfs = L.opp_fs;
-            while (nfs > 8 && gfx_measure_text(nm, nfs) > room) nfs -= 1;
-            gfx_text(nm, L.side_x, by + (L.opp_row - nfs) / 2, nfs,
-                     their_turn ? ACCENT : WHITE);
-            bi++;
+    // --- Side column: every seat, in turn order ---------------------------
+    // You are listed with everyone else, so the column reads as the turn
+    // order and your score sits beside theirs. The seat whose turn it is gets
+    // a solid accent bar with dark type -- one unmistakable row -- rather
+    // than the thin outline that was easy to miss.
+    for (int s = 0; s < game->rules.player_count; s++) {
+        int by = L.opp_y + s * L.opp_row;
+        int ty = by + (L.opp_row - L.opp_fs) / 2;
+        bool me = (s == focus);
+        bool active = seat_is_active(game, s);
+        if (active) {
+            rect_rounded_px(L.side_x - 4, by + 1, L.side_w + 8, L.opp_row - 2,
+                            L.opp_row / 4, ACCENT);
         }
+        snprintf(buf, sizeof buf, "%d", game->players[s].score);
+        int score_w = gfx_measure_text(buf, L.opp_fs);
+        gfx_text(buf, L.side_x + L.side_w - score_w, ty, L.opp_fs,
+                 active ? TURN_INK : YELLOW);
+
+        // The dots stand in for an opponent's hidden rack; your own rack is
+        // the column beside this one, so your row has none.
+        int dots_w = me ? 0 : L.opp_fs;
+        if (!me) {
+            draw_thinking_dots(L.side_x + L.side_w - score_w - dots_w - L.opp_fs / 3,
+                               by + L.opp_row / 2, L.opp_fs, active);
+        }
+
+        // Names are player-chosen online, so shrink one that would run into
+        // the dots rather than letting it overlap them.
+        const char* nm = seat_name(game, s);
+        int room = L.side_w - score_w - dots_w - L.opp_fs;
+        int nfs = L.opp_fs;
+        while (nfs > 8 && gfx_measure_text(nm, nfs) > room) nfs -= 1;
+        gfx_text(nm, L.side_x, by + (L.opp_row - nfs) / 2, nfs,
+                 active ? TURN_INK : WHITE);
     }
 
     // --- Side column: score line and the instruction -----------------------
@@ -336,8 +342,7 @@ static void draw_table_portrait(const Game* game, const TableUi* ui) {
                  : game->held_from_discard     ? "TAP A SLOT TO PLACE"
                                                : "TAP A SLOT, OR THE DISCARD TO THROW";
     } else {
-        snprintf(buf, sizeof buf, "%s THINKING", seat_name(game, game->turn));
-        turn_msg = buf;
+        turn_msg = turn_owner_text(game, buf, sizeof buf);
     }
 
     // In 2-player games an ascending rack also needs a run of 3 consecutive
@@ -358,12 +363,21 @@ static void draw_table_portrait(const Game* game, const TableUi* ui) {
     while (sfs > 8 && gfx_measure_text(stats, sfs) > L.side_w) sfs -= 1;
     text_centered(stats, L.side_x + L.side_w / 2, L.stats_y, sfs, SLOT_LABEL);
 
+    // On your turn a heading says so outright, above what to do; the
+    // instruction alone ("TAP A PILE TO DRAW") left it to be inferred.
+    int iy = L.status_y;
+    if (human_turn) {
+        int hfs = L.status_fs * 6 / 5;
+        while (hfs > 9 && gfx_measure_text("YOUR TURN", hfs) > L.side_w) hfs -= 1;
+        text_centered("YOUR TURN", L.side_x + L.side_w / 2, iy, hfs, ACCENT);
+        iy += hfs + L.status_lh / 2;
+    }
     char lines[WRAP_MAX_LINES][WRAP_MAX_CHARS];
     int nlines = wrap_text(turn_msg, L.status_fs, L.side_w, lines);
     for (int i = 0; i < nlines; i++) {
         text_centered(lines[i], L.side_x + L.side_w / 2,
-                      L.status_y + i * L.status_lh, L.status_fs,
-                      human_turn ? ACCENT : SLOT_LABEL);
+                      iy + i * L.status_lh, L.status_fs,
+                      human_turn ? WHITE : SLOT_LABEL);
     }
 
     // --- Side column: the three piles, stacked -----------------------------
