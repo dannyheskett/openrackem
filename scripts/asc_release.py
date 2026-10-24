@@ -66,9 +66,11 @@ BASE = "https://api.appstoreconnect.apple.com"
 
 # How long a submission waits for Apple to finish processing the version's
 # screenshots, and how often it looks. Processing usually takes a minute or
-# two; the deadline is generous so a slow day at Apple still ships, and a
-# screenshot that never finishes still fails loudly rather than hanging.
-ASSET_WAIT_SECONDS = 20 * 60
+# two; the deadline leaves room for a slow day at Apple, and a screenshot that
+# never finishes still fails loudly. It sits inside the workflow jobs'
+# 20-minute timeout with room for the steps before it, so the job ends on this
+# script's explanation rather than the runner killing it.
+ASSET_WAIT_SECONDS = 10 * 60
 ASSET_POLL_SECONDS = 15
 
 REPO = Path(__file__).resolve().parent.parent

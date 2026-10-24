@@ -154,8 +154,9 @@ jobs:
     # Linux, not macOS: the metadata and review-submission APIs are pure REST.
     # Only the .ipa upload itself needs Xcode, and release.yml already did that.
     runs-on: ubuntu-22.04
-    # Room for asc_release.py's 20-minute wait on Apple's screenshot processing.
-    timeout-minutes: 40
+    # Room for the listing upload plus asc_release.py's 10-minute wait on
+    # Apple's screenshot processing, which then fails with its own message.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - name: Install the JWT dependency
