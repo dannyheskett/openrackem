@@ -90,8 +90,10 @@ make web
 make web-serve                      # http://localhost:8080/openrackem.html
 ```
 
-A desktop browser gets the landscape keyboard layout; a phone gets the
-portrait touch layout — same binary, chosen by pointer type.
+Every platform draws the same layout. A phone gets it full screen with touch
+controls; a desktop browser (like the native desktop app) gets it in a centred
+column, played with the mouse or keyboard — same binary, chosen by pointer
+type.
 
 ### macOS / Android / iOS
 
@@ -121,9 +123,9 @@ it; point it at a daemon with `OPENRACKEM_SERVER` / `OPENRACKEM_PORT`
   (`GAME_SERIAL_SIZE`), which tests enforce.
 - The AI consumes a redacted `GameView` — it structurally cannot see another
   rack, the stock order, or the RNG seed.
-- Two renderers behind one dispatch: fixed 640x480 landscape (desktop) and an
-  adaptive portrait layout (touch), both drawing through the `gfx.h`
-  primitive layer so the iOS Metal backend swaps in cleanly.
+- One adaptive portrait layout everywhere: full screen on phones, a centred
+  3:5 column on desktop. It draws through the `gfx.h` primitive layer so the
+  iOS Metal backend swaps in cleanly.
 - Sound effects are synthesized at startup (square waves, sweeps, noise) —
   no audio files. Off by default.
 - The desktop builds include a frame-fidelity `.mp4` recorder (`--record

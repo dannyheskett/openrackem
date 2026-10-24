@@ -6,13 +6,6 @@
 #include "or_types.h"
 #include <stdbool.h>
 
-// The landscape renderer draws to a fixed 640x480 off-screen canvas that
-// present() integer-scales and letterboxes into the window. These are the
-// landscape canvas dimensions only — the portrait renderer sizes itself from the
-// live screen (GetScreenWidth/Height) and does not use BASE_WIDTH/BASE_HEIGHT.
-#define BASE_WIDTH  640
-#define BASE_HEIGHT 480
-
 // Presentation state owned by the frame loop, read by the renderers: the
 // keyboard rack-slot cursor and which round-over page is showing.
 typedef struct {
@@ -60,10 +53,11 @@ int render_picker_hit_test(Vector2 p);
 enum { HIT_NONE = -1, HIT_STOCK = 10, HIT_DISCARD = 11 };
 int render_table_hit_test(Vector2 p);
 
-// Active renderer selection. Native builds have exactly one renderer, so
-// render_use_portrait() is a compile-time constant there (true on Android/iOS,
-// false on desktop). The web build compiles both and picks at runtime:
-// render_set_portrait(true) = portrait touch layout, false = desktop landscape.
+// Touch device or desktop. Both draw the same layout; a touch device fills the
+// screen with it and takes taps, a desktop centres it in a phone-shaped column
+// and takes the mouse and keyboard. A compile-time constant on native builds
+// (true on Android/iOS, false on desktop); the web build sets it at startup:
+// render_set_portrait(true) = touch, false = desktop browser.
 void render_set_portrait(bool portrait);
 bool render_use_portrait(void);
 
