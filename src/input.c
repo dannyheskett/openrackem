@@ -13,6 +13,28 @@
 // the keyboard — same binary. Android/iOS run only touch; desktop native runs
 // only keyboard.
 
+#if defined(PLATFORM_WEB) && defined(__EMSCRIPTEN__)
+#include <emscripten/html5.h>
+
+// raylib samples the mouse buttons once per frame, so a press released before
+// that sample is lost. A Mac trackpad's tap-to-click delivers mousedown and
+// mouseup back to back, so most clicks vanished. Latch every mousedown on the
+// canvas until the next poll instead. (raylib's GLFW layer listens for the
+// same events on its own, so this handler adds to it rather than replacing it.)
+static bool  s_click_latched;
+static float s_click_x, s_click_y;
+
+static EM_BOOL on_mousedown(int type, const EmscriptenMouseEvent* e, void* user) {
+    (void)type; (void)user;
+    if (e->button == 0) {
+        s_click_latched = true;
+        s_click_x = (float)e->targetX;
+        s_click_y = (float)e->targetY;
+    }
+    return EM_FALSE;  // leave the event to raylib as well
+}
+#endif
+
 #if !defined(PLATFORM_ANDROID) && !defined(PLATFORM_IOS)
 // Keyboard source: sets the base field values.
 static void poll_keyboard(Input* in) {
@@ -22,6 +44,24 @@ static void poll_keyboard(Input* in) {
     in->mouse_x = (int)mp.x;
     in->mouse_y = (int)mp.y;
     in->left_pressed = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+#if defined(PLATFORM_WEB) && defined(__EMSCRIPTEN__)
+    static bool hooked = false;
+    if (!hooked) {
+        emscripten_set_mousedown_callback("#canvas", NULL, EM_FALSE, on_mousedown);
+        hooked = true;
+    }
+    if (s_click_latched) {
+        in->left_pressed = true;
+        in->mouse_x = (int)s_click_x;
+        in->mouse_y = (int)s_click_y;
+        s_click_latched = false;
+    }
+#endif
+#if defined(PLATFORM_WEB)
+    // The portrait (touch) layout folds the mouse into its tap recognizer
+    // (poll_touch); a click there must not also count as a press.
+    if (render_use_portrait()) in->left_pressed = false;
+#endif
 
     // Draws. S/Left = stock, D/Right = discard.
     in->draw_stock_pressed   = IsKeyPressed(KEY_S) || IsKeyPressed(KEY_LEFT);
@@ -85,7 +125,7 @@ static TouchState s_touch;
 // the pause/back gesture; swipes move the menu cursor. Only ever sets fields
 // true, so it composes over the keyboard source on web without clobbering it.
 static void poll_touch(Input* in) {
-    if (!render_use_portrait()) return; // landscape (desktop-browser) mode: keyboard only
+    if (!render_use_portrait()) return; // desktop browser: mouse and keyboard only
 
     // Active pointers: touch points, or the mouse while its button is held.
     int n = GetTouchPointCount();

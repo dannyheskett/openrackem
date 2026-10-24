@@ -1,20 +1,78 @@
-// Portrait (touch) renderer: adaptive layout drawn straight to the screen at
-// the device's real resolution — the OPENRACKEM title bar pinned top, a
-// compact seats band beneath it, the ten rack slots filling the middle at
-// the largest row height that fits, and the stock/discard band fixed at the
-// bottom within the safe area, which is where the thumb is. Compiles to an
-// empty object off OR_PORTRAIT.
+// The table renderer: an adaptive portrait layout at the device's real
+// resolution — the OPENRACKEM title bar pinned top, the ten rack slots in one
+// column filling the height, and beside them the seats, the instruction and
+// the stock/discard/held stack at the bottom, which is where the thumb is.
+//
+// Phones draw it edge to edge. Desktop windows (the native app, and the web
+// build on a mouse-and-keyboard machine) draw the same layout in a centred,
+// phone-shaped column with felt either side: the layout is tuned for a tall,
+// narrow surface and comes apart when stretched wide.
 #include "render_internal.h"
+#include "present.h"
 #include "safe_area.h"
 #include "softkbd.h"
 #include <stddef.h> // NULL
 #include <stdio.h>
 #include <string.h>  // strlen
+#if !defined(PLATFORM_IOS)
+#include <rlgl.h>    // the column offset (never used on iOS, which is never framed)
+#endif
 
-#ifdef OR_PORTRAIT
+// --- The view ---------------------------------------------------------------
+// Every metric below derives from the view being drawn — the whole surface on
+// a phone, the column on a desktop — never from the window directly.
+#define COLUMN_ASPECT_W 3   // desktop column: at most 3 wide per 5 tall
+#define COLUMN_ASPECT_H 5
 
-// Thin full-width title bar across the very top, matching the landscape
-// renderer's (24px tall with 16px text on the 480px canvas — keep that ratio).
+static int s_view_w, s_view_h;  // the view: the column being drawn into
+static int s_view_x;            // its left edge within the full surface
+static int s_full_w;            // the full surface width (the title bar spans it)
+
+static int view_w(void) { return s_view_w; }
+static int view_h(void) { return s_view_h; }
+
+// Desktop: a mouse, a keyboard and a window, rather than a touchscreen.
+static bool framed(void) { return !render_use_portrait(); }
+
+// How the player points at things, for the instructions.
+static const char* point_verb(void) { return framed() ? "CLICK" : "TAP"; }
+
+typedef struct { void (*draw)(void*); void* ctx; } ViewScene;
+
+static void view_scene(void* p, int full_w, int full_h) {
+    ViewScene* v = (ViewScene*)p;
+    int cw = full_w;
+    if (framed() && cw > full_h * COLUMN_ASPECT_W / COLUMN_ASPECT_H)
+        cw = full_h * COLUMN_ASPECT_W / COLUMN_ASPECT_H;
+    s_view_w = cw;
+    s_view_h = full_h;
+    s_view_x = (full_w - cw) / 2;
+    s_full_w = full_w;
+
+    // Tap and click targets come from the window pass only, never from the
+    // recorder's fixed-size pass; the column offset maps them into the window.
+    bool window_pass = (full_w == GetScreenWidth() && full_h == GetScreenHeight());
+    hit_capture_enable(window_pass);
+    hit_offset_set((float)s_view_x, 0.0f);
+#if !defined(PLATFORM_IOS)
+    rlPushMatrix();
+    rlTranslatef((float)s_view_x, 0.0f, 0.0f);
+#endif
+    v->draw(v->ctx);
+#if !defined(PLATFORM_IOS)
+    rlPopMatrix();
+#endif
+    hit_offset_set(0.0f, 0.0f);
+    hit_capture_enable(true);
+}
+
+static void present_view(void (*draw)(void*), void* ctx) {
+    ViewScene v = { draw, ctx };
+    present(view_scene, &v);
+}
+
+// Thin full-width title bar across the very top (24px tall with 16px text on
+// a 480px-tall view — keep that ratio).
 static int title_fs(int h)    { int fs = h / 45; return (fs < 10) ? 10 : fs; }
 static int title_bar_h(int h) { int fs = title_fs(h); return fs + fs / 2; }
 
@@ -31,7 +89,7 @@ static int top_bar_h(int h) {
 // layout bands. Scales with the short screen dimension so it stays
 // proportional across resolutions and aspect ratios.
 static int outer_margin(void) {
-    int w = GetScreenWidth(), h = GetScreenHeight();
+    int w = view_w(), h = view_h();
     int m = ((w < h) ? w : h) / 28;
     return (m < 6) ? 6 : m;
 }
@@ -51,10 +109,10 @@ static void text_centered(const char* s, int cx, int y, int fs, Color c) {
 //   - lopsided (corner camera) -> whole word on the roomier side, if it fits.
 //   - wide notch, nothing fits -> bar only, no wordmark.
 static void draw_title_bar(void) {
-    int w = GetScreenWidth(), h = GetScreenHeight();
+    int w = view_w(), h = view_h();
     int fs = title_fs(h), tb_h = top_bar_h(h);
     int ty = (tb_h - fs) / 2;   // wordmark vertically centered in the bar
-    gfx_rect(0, 0, w, tb_h, DARKGRAY);
+    gfx_rect(-s_view_x, 0, s_full_w, tb_h, DARKGRAY);  // across the whole window
 
     SafeArea sa = safe_area_get();
     int top = sa.top, cl = sa.cutout_left, cr = sa.cutout_right;
@@ -158,7 +216,7 @@ static int wrap_text(const char* text, int fs, int width,
 }
 
 static void portrait_layout(const Game* game, PortraitLayout* L) {
-    int w = GetScreenWidth(), h = GetScreenHeight();
+    int w = view_w(), h = view_h();
     int m = outer_margin();
     int tb = top_bar_h(h);
     L->m = m;
@@ -208,7 +266,8 @@ static void portrait_layout(const Game* game, PortraitLayout* L) {
     int gap_top    = L->opp_y + L->opp_h + m;
     int gap_bottom = L->pile_y - 2 * L->pile_step - L->pile_label_fs - m;
     // Room for the turn heading plus a two-line instruction.
-    int block_h    = L->stats_fs + 6 + L->status_lh * 3;
+    int block_h    = L->stats_fs + 6 + L->status_lh * 3
+                   + (framed() ? L->stats_fs + L->status_lh / 4 : 0);
     L->stats_y  = gap_top + (gap_bottom - gap_top - block_h) / 2;
     if (L->stats_y < gap_top) L->stats_y = gap_top;
     L->status_y = L->stats_y + L->stats_fs + 6;
@@ -262,7 +321,7 @@ static Rectangle pile_hit(const PortraitLayout* L, Rectangle r) {
 
 static void draw_table_portrait(const Game* game, const TableUi* ui) {
     char buf[64];
-    int w = GetScreenWidth();
+    int w = view_w();
     PortraitLayout L;
     portrait_layout(game, &L);
     int focus = focus_seat(game);
@@ -336,11 +395,21 @@ static void draw_table_portrait(const Game* game, const TableUi* ui) {
 
     // --- Side column: score line and the instruction -----------------------
     const char* turn_msg;
+    char msg[48];
+    const char* keys = NULL;  // the keyboard's equivalent, on desktop
     if (game->phase == PHASE_DEAL) turn_msg = "DEALING...";
     else if (human_turn) {
-        turn_msg = (game->phase == PHASE_DRAW) ? "TAP A PILE TO DRAW"
-                 : game->held_from_discard     ? "TAP A SLOT TO PLACE"
-                                               : "TAP A SLOT, OR THE DISCARD TO THROW";
+        snprintf(msg, sizeof msg,
+                 (game->phase == PHASE_DRAW) ? "%s A PILE TO DRAW"
+                 : game->held_from_discard   ? "%s A SLOT TO PLACE"
+                                             : "%s A SLOT, OR THE DISCARD TO THROW",
+                 point_verb());
+        turn_msg = msg;
+        if (framed()) {
+            keys = (game->phase == PHASE_DRAW) ? "S: STOCK   D: DISCARD"
+                 : game->held_from_discard     ? "UP/DOWN + ENTER"
+                                               : "UP/DOWN + ENTER   X: THROW";
+        }
     } else {
         turn_msg = turn_owner_text(game, buf, sizeof buf);
     }
@@ -378,6 +447,16 @@ static void draw_table_portrait(const Game* game, const TableUi* ui) {
         text_centered(lines[i], L.side_x + L.side_w / 2,
                       iy + i * L.status_lh, L.status_fs,
                       human_turn ? WHITE : SLOT_LABEL);
+    }
+    if (keys) {
+        // The keyboard line is a nicety: in a small window it gives way rather
+        // than run into the STOCK label below it.
+        int kfs = L.stats_fs;
+        while (kfs > 8 && gfx_measure_text(keys, kfs) > L.side_w) kfs -= 1;
+        int ky = iy + nlines * L.status_lh + L.status_lh / 4;
+        int stock_label_y = (int)pile_rect(&L, 0).y - L.pile_label_fs - 4;
+        if (ky + kfs + L.m / 2 <= stock_label_y)
+            text_centered(keys, L.side_x + L.side_w / 2, ky, kfs, SLOT_LABEL);
     }
 
     // --- Side column: the three piles, stacked -----------------------------
@@ -481,7 +560,7 @@ static void team_label(const Game* g, int pair, char* out, size_t n) {
 
 static void draw_round_scoring_portrait(const Game* game) {
     char buf[64];
-    int w = GetScreenWidth(), h = GetScreenHeight();
+    int w = view_w(), h = view_h();
     int m = outer_margin();
     int tb = top_bar_h(h);
     int title_fs2 = clampi(h / 22, 14, 120);
@@ -508,12 +587,12 @@ static void draw_round_scoring_portrait(const Game* game) {
         draw_mini_rack(m, y + fs + 4, cw, ch, &game->players[s].rack, true);
         y += block_h;
     }
-    text_centered("TAP TO CONTINUE", w / 2, h - m - fs, fs, GRAY);
+    text_centered(framed() ? "CLICK OR PRESS ENTER" : "TAP TO CONTINUE", w / 2, h - m - fs, fs, GRAY);
 }
 
 static void draw_standings_portrait(const Game* game) {
     char buf[64];
-    int w = GetScreenWidth(), h = GetScreenHeight();
+    int w = view_w(), h = view_h();
     int m = outer_margin();
     int tb = top_bar_h(h);
     int title_fs2 = clampi(h / 22, 14, 120);
@@ -557,7 +636,7 @@ static void draw_standings_portrait(const Game* game) {
         }
     }
     int fs2 = clampi(h / 45, 9, 48);
-    text_centered("TAP TO CONTINUE", w / 2, h - m - fs2, fs2, GRAY);
+    text_centered(framed() ? "CLICK OR PRESS ENTER" : "TAP TO CONTINUE", w / 2, h - m - fs2, fs2, GRAY);
 }
 
 // Match over. The verdict is the hero: previously "MATCH OVER" was the largest
@@ -567,7 +646,7 @@ static void draw_standings_portrait(const Game* game) {
 // in finishing order rather than seat order.
 static void draw_match_over_portrait(const Game* game) {
     char buf[64];
-    int w = GetScreenWidth(), h = GetScreenHeight();
+    int w = view_w(), h = view_h();
     int m = outer_margin();
     int tb = top_bar_h(h);
 
@@ -666,7 +745,7 @@ static void draw_match_over_portrait(const Game* game) {
         }
     }
 
-    text_centered("TAP TO CONTINUE", w / 2, h - m - fs2, fs2, GRAY);
+    text_centered(framed() ? "CLICK OR PRESS ENTER" : "TAP TO CONTINUE", w / 2, h - m - fs2, fs2, GRAY);
 }
 
 static void draw_game_portrait(const Game* game, const TableUi* ui) {
@@ -685,7 +764,7 @@ static void draw_game_portrait(const Game* game, const TableUi* ui) {
 }
 
 static void draw_center_panel_portrait(const char* title, const char* subtitle, Color tc) {
-    int w = GetScreenWidth(), h = GetScreenHeight();
+    int w = view_w(), h = view_h();
     int base = (w < h) ? w : h;   // keep the dialog compact even in a wide window
     int pw = base * 82 / 100;
     int ph = base * 26 / 100;
@@ -694,30 +773,45 @@ static void draw_center_panel_portrait(const char* title, const char* subtitle, 
 }
 
 // One table scene with an optional centered overlay (pause).
+typedef struct {
+    const Game* g; const TableUi* ui;
+    const char* ot; const char* os; Color otc;
+} SceneCtx;
+
+static void draw_scene_cb(void* p) {
+    SceneCtx* c = (SceneCtx*)p;
+    draw_game_portrait(c->g, c->ui);
+    if (c->ot) draw_center_panel_portrait(c->ot, c->os, c->otc);
+}
+
 static void draw_scene_portrait(const Game* game, const TableUi* ui,
                                 const char* overlay_title, const char* overlay_sub,
                                 Color overlay_tc) {
-    gfx_begin_frame();
-    draw_game_portrait(game, ui);
-    if (overlay_title) draw_center_panel_portrait(overlay_title, overlay_sub, overlay_tc);
-    gfx_end_frame();
+    SceneCtx c = { game, ui, overlay_title, overlay_sub, overlay_tc };
+    present_view(draw_scene_cb, &c);
 }
 
 void render_frame_portrait(const Game* g, const TableUi* ui) {
     draw_scene_portrait(g, ui, NULL, NULL, WHITE);
 }
 void render_pause_portrait(const Game* g, const TableUi* ui) {
-    draw_scene_portrait(g, ui, "GAME PAUSED", "Tap to resume", YELLOW);
+    draw_scene_portrait(g, ui, "GAME PAUSED",
+                        framed() ? "Press any key to resume" : "Tap to resume", YELLOW);
 }
 
 // The slot picker, sized off the live screen like everything else here. Twelve
 // name slots have to fit a phone's width, so the slots themselves are modest;
 // the spinner bands and the buttons are what get the thumb-sized targets.
 // Where the device has an on-screen keyboard (softkbd.h) it does the typing.
-void render_picker_portrait(const char* title, const char* slots, int cursor,
-                            const char* alphabet, const char* hint,
-                            const char* ok_label) {
-    int w = GetScreenWidth(), h = GetScreenHeight();
+typedef struct {
+    const char* title; const char* slots; int cursor;
+    const char* alphabet; const char* hint; const char* ok;
+} PickerCtx;
+
+static void draw_picker_cb(void* p) {
+    const PickerCtx* c = (const PickerCtx*)p;
+    const char* slots = c->slots;
+    int w = view_w(), h = view_h();
     int base = (w < h) ? w : h;
     int n = (int)strlen(slots);
     if (n < 1) n = 1;
@@ -760,11 +854,15 @@ void render_picker_portrait(const char* title, const char* slots, int cursor,
         .btn_w = btn_w, .btn_h = btn_h, .btn_fs = btn_fs,
     };
 
-    gfx_begin_frame();
     gfx_clear(BLACK);
     draw_title_bar();
-    draw_picker_panel(L, title, slots, cursor, alphabet, hint, ok_label, true);
-    gfx_end_frame();
+    draw_picker_panel(L, c->title, slots, c->cursor, c->alphabet, c->hint, c->ok, true);
 }
 
-#endif // OR_PORTRAIT
+void render_picker_portrait(const char* title, const char* slots, int cursor,
+                            const char* alphabet, const char* hint,
+                            const char* ok_label) {
+    PickerCtx c = { title, slots, cursor, alphabet, hint, ok_label };
+    present_view(draw_picker_cb, &c);
+}
+

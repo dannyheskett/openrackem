@@ -15,7 +15,7 @@ MINIH264_INC := third_party/minih264
 MINIMP4_INC  := third_party/minimp4
 
 SRC := src/main.c src/rules.c src/game.c src/ai.c src/tick.c src/input.c \
-       src/render.c src/render_portrait.c src/render_landscape.c src/gfx_raylib.c \
+       src/render.c src/render_portrait.c src/gfx_raylib.c \
        src/safe_area.c src/menu.c src/present.c src/window.c \
        src/sound.c src/audio_raylib.c \
        src/netgame.c src/net_ws.c src/net_posix.c src/net_stub.c src/net_web.c \
@@ -450,7 +450,7 @@ IOS_SIGN_IDENTITY ?=
 IOS_PROFILE       ?=
 IOS_TEAM_ID       ?=
 IOS_C_SRC      := src/rules.c src/game.c src/ai.c src/tick.c src/main.c \
-                  src/render.c src/render_portrait.c src/render_landscape.c \
+                  src/render.c src/render_portrait.c \
                   src/input.c src/sound.c src/recorder.c src/safe_area.c \
                   src/menu.c src/present.c src/window.c \
                   src/netgame.c src/prefs.c src/softkbd.c

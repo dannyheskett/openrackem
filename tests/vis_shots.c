@@ -1,12 +1,13 @@
 // Visual-verification harness: fabricates deterministic game states and
-// screenshots every screen in both renderers, so layout work is checked
-// against real pixels instead of guessed at. Not part of `make test` — run
+// screenshots every screen both as a desktop window (the layout in a centred
+// column) and as a phone (full screen), so layout work is checked against
+// real pixels instead of guessed at. Not part of `make test` — run
 // `make shots` (needs a display).
 //
-// Built with -DPLATFORM_WEB so both renderers compile (OR_RUNTIME_RENDERER)
-// and render_set_portrait() can flip between them at runtime; the emscripten
-// main loop never runs because this file provides its own main(). The window
-// is resized to a phone aspect for the portrait set.
+// Built with -DPLATFORM_WEB so render_set_portrait() can flip between desktop
+// and touch at runtime; the emscripten main loop never runs because this file
+// provides its own main(). The window is resized to a phone aspect for the
+// phone set.
 
 #include "game.h"
 #include "render.h"
@@ -106,9 +107,9 @@ int main(void) {
     render_init();
 
     render_set_portrait(false);
-    shoot_all("landscape");
+    shoot_all("desktop");
 
-    // Phone aspect for the portrait set; a few frames to let the resize land.
+    // Phone aspect for the phone set; a few frames to let the resize land.
     SetWindowSize(420, 840);
     render_set_portrait(true);
     Game* warm = make_game(false);
