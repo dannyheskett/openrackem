@@ -620,7 +620,9 @@ jobs:
     name: submit the build to App Review
     needs: [prepare, publish-testflight, testflight-notes]
     runs-on: ubuntu-22.04
-    timeout-minutes: 15
+    # Room for the listing upload plus asc_release.py's 10-minute wait on
+    # Apple's screenshot processing, which then fails with its own message.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
         with:
