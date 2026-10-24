@@ -18,6 +18,11 @@ Two Apple-specific shapes worth knowing:
 * Submitting is not one call. appStoreVersionSubmissions is gone; the current
   flow is POST /reviewSubmissions, add a reviewSubmissionItem for the version,
   then PATCH the submission to submitted=true.
+* Apple processes each uploaded screenshot after the commit, and a version
+  whose screenshots are still processing cannot be submitted (409
+  STATE_ERROR.ASSET_IN_POST_PROCESSING). The listing step replaces every
+  screenshot moments before the submit step, so submitting waits until Apple
+  reports each one COMPLETE.
 
 Credentials (same secrets the TestFlight upload already uses):
   $ASC_KEY_P8       the .p8 private key contents
@@ -58,6 +63,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from store_listing import ListingError, asc_listing  # noqa: E402
 
 BASE = "https://api.appstoreconnect.apple.com"
+
+# How long a submission waits for Apple to finish processing the version's
+# screenshots, and how often it looks. Processing usually takes a minute or
+# two; the deadline is generous so a slow day at Apple still ships, and a
+# screenshot that never finishes still fails loudly rather than hanging.
+ASSET_WAIT_SECONDS = 20 * 60
+ASSET_POLL_SECONDS = 15
+
 REPO = Path(__file__).resolve().parent.parent
 LOCALE = "en-US"
 
@@ -129,11 +142,36 @@ def is_placeholder(value):
     return isinstance(value, str) and value.startswith("<")
 
 
+class ASCError(Exception):
+    """An App Store Connect error the caller asked to handle itself."""
+
+    def __init__(self, status, method, path, text):
+        super().__init__(f"HTTP {status} on {method} {path}\n{text[:1500]}")
+        self.status = status
+        self.text = text
+
+    def has_code(self, prefix):
+        """Whether any error in the body (or its associatedErrors) has a code
+        starting with `prefix`."""
+        try:
+            errors = json.loads(self.text).get("errors", [])
+        except ValueError:
+            return False
+        pending = list(errors)
+        while pending:
+            err = pending.pop()
+            if str(err.get("code", "")).startswith(prefix):
+                return True
+            for nested in ((err.get("meta") or {}).get("associatedErrors") or {}).values():
+                pending.extend(nested)
+        return False
+
+
 class ASC:
     def __init__(self, dry_run=False):
         self.dry_run = dry_run
 
-    def call(self, method, path, body=None, mutating=None):
+    def call(self, method, path, body=None, mutating=None, raise_errors=False):
         if mutating is None:
             mutating = method != "GET"
         if self.dry_run and mutating:
@@ -152,7 +190,10 @@ class ASC:
                 raw = r.read()
             return json.loads(raw) if raw else {}
         except urllib.error.HTTPError as e:
-            sys.exit(f"HTTP {e.code} on {method} {path}\n{e.read().decode()[:1500]}")
+            text = e.read().decode()
+            if raise_errors:
+                raise ASCError(e.code, method, path, text) from None
+            sys.exit(f"HTTP {e.code} on {method} {path}\n{text[:1500]}")
 
     def put_bytes(self, op, blob):
         """One upload operation from a reserved asset: raw PUT, Apple's headers."""
@@ -328,6 +369,72 @@ def upload_screenshots(asc, loc_id, shots, display_type):
         print(f"  screenshot {display_type} {path.name}")
 
 
+def screenshot_states(asc, version_id):
+    """Every screenshot on the version, as (display type, file name, state).
+
+    The state is Apple's assetDeliveryState: AWAITING_UPLOAD, UPLOAD_COMPLETE,
+    COMPLETE or FAILED, with FAILED carrying errors.
+    """
+    out = []
+    locs = asc.call("GET", f"/v1/appStoreVersions/{version_id}/appStoreVersionLocalizations")
+    for loc in locs.get("data", []):
+        sets = asc.call("GET", f"/v1/appStoreVersionLocalizations/{loc['id']}/appScreenshotSets")
+        for st in sets.get("data", []):
+            display = st["attributes"]["screenshotDisplayType"]
+            shots = asc.call("GET", f"/v1/appScreenshotSets/{st['id']}/appScreenshots?limit=50")
+            for shot in shots.get("data", []):
+                a = shot["attributes"]
+                delivery = a.get("assetDeliveryState") or {}
+                out.append((display, a.get("fileName", shot["id"]),
+                            delivery.get("state", "UNKNOWN"), delivery.get("errors") or []))
+    return out
+
+
+def wait_for_screenshots(asc, version_id, deadline):
+    """Block until Apple has finished processing every screenshot on the
+    version. Exits on a FAILED screenshot, or if processing outlasts the
+    deadline, naming the screenshots involved."""
+    while True:
+        states = screenshot_states(asc, version_id)
+        failed = [s for s in states if s[2] == "FAILED"]
+        if failed:
+            lines = "\n".join(f"  {d} {n}: {json.dumps(e)}" for d, n, _, e in failed)
+            sys.exit(f"Apple failed to process {len(failed)} screenshot(s):\n{lines}")
+        pending = [s for s in states if s[2] != "COMPLETE"]
+        if not pending:
+            print(f"  screenshots processed ({len(states)})")
+            return
+        if time.monotonic() >= deadline:
+            lines = "\n".join(f"  {d} {n}: {st}" for d, n, st, _ in pending)
+            sys.exit(f"screenshots still processing after {ASSET_WAIT_SECONDS // 60} min:\n{lines}")
+        print(f"  waiting on Apple to process {len(pending)} of {len(states)} screenshot(s)")
+        time.sleep(ASSET_POLL_SECONDS)
+
+
+def add_submission_item(asc, sub_id, version_id, deadline):
+    """Add the version to the review submission. Apple's reviewability check
+    can trail the screenshots' COMPLETE state by a little, so a refusal for
+    assets still in post-processing waits and tries again until the deadline;
+    any other error fails at once."""
+    body = {"data": {"type": "reviewSubmissionItems",
+                     "relationships": {
+                         "reviewSubmission": {"data": {"type": "reviewSubmissions", "id": sub_id}},
+                         "appStoreVersion": {"data": {"type": "appStoreVersions",
+                                                      "id": version_id}}}}}
+    while True:
+        try:
+            asc.call("POST", "/v1/reviewSubmissionItems", body, raise_errors=True)
+            return
+        except ASCError as e:
+            if not (e.status == 409 and e.has_code("STATE_ERROR.ASSET_IN_POST_PROCESSING")):
+                sys.exit(str(e))
+            if time.monotonic() >= deadline:
+                sys.exit(f"Apple still reports assets in post-processing after "
+                         f"{ASSET_WAIT_SECONDS // 60} min\n{e}")
+            print("  Apple still post-processing an asset; trying again shortly")
+            time.sleep(ASSET_POLL_SECONDS)
+
+
 # The App Review contact fields. Apple refuses a submission whose version has
 # no copyright line or no review details, and it only carries them forward from
 # an earlier version -- an app's FIRST version has neither.
@@ -495,6 +602,12 @@ def cmd_release(asc, args):
 
     ensure_review_info(asc, app, version_id)
 
+    # The listing step has just replaced every screenshot, and Apple will not
+    # take a version whose screenshots are still processing.
+    deadline = time.monotonic() + ASSET_WAIT_SECONDS
+    if not asc.dry_run and not is_placeholder(version_id):
+        wait_for_screenshots(asc, version_id, deadline)
+
     # Reuse an unsent draft if one exists. Creating the submission is the step
     # that succeeds even when the version is not reviewable, so every failed
     # attempt used to leave an empty READY_FOR_REVIEW draft behind -- and Apple
@@ -510,12 +623,7 @@ def cmd_release(asc, args):
                      "attributes": {"platform": "IOS"},
                      "relationships": {"app": {"data": {"type": "apps", "id": app}}}}})
         sub_id = (submission.get("data") or {}).get("id", "<submission>")
-    asc.call("POST", "/v1/reviewSubmissionItems", {
-        "data": {"type": "reviewSubmissionItems",
-                 "relationships": {
-                     "reviewSubmission": {"data": {"type": "reviewSubmissions", "id": sub_id}},
-                     "appStoreVersion": {"data": {"type": "appStoreVersions",
-                                                  "id": version_id}}}}})
+    add_submission_item(asc, sub_id, version_id, deadline)
     asc.call("PATCH", f"/v1/reviewSubmissions/{sub_id}",
              {"data": {"type": "reviewSubmissions", "id": sub_id,
                        "attributes": {"submitted": True}}})
