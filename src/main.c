@@ -100,8 +100,8 @@ static int build_menu(bool resumable, const char* labels[], MenuAction actions[]
     labels[n] = recorder_active() ? "Record: On" : "Record: Off"; actions[n++] = ACT_RECORD;
 #endif
 #if defined(PLATFORM_WEB)
-    // A browser tab can't be closed from code, so no Exit on web. (The renderer —
-    // portrait touch vs desktop landscape — is auto-detected by pointer type.)
+    // A browser tab can't be closed from code, so no Exit on web. (Touch vs
+    // desktop presentation is auto-detected by pointer type.)
 #elif !defined(PLATFORM_IOS) && !defined(PLATFORM_ANDROID)
     // Mobile apps don't self-terminate (the OS owns the lifecycle: home gesture /
     // back button on Android, Apple guidelines on iOS), so no Exit on either.
@@ -247,8 +247,19 @@ typedef struct {
     TypeState typing;  // keystroke history for whichever entry screen is up
 } AppCtx;
 
+// Where the pointer picked something this frame: a completed tap, or a mouse
+// click. Hit-tested against the menu rows, the picker or the table zones.
+static bool pointer_tap(const Input* in, Vector2* p) {
+    if (in->touch_tap) { *p = (Vector2){in->tap_x, in->tap_y}; return true; }
+    if (in->left_pressed) {
+        *p = (Vector2){(float)in->mouse_x, (float)in->mouse_y};
+        return true;
+    }
+    return false;
+}
+
 // Synthesize the acting player's Action for this frame from keyboard and
-// touch, for the seat `seat` of game `g` with cursor state `ui`. Returns true
+// pointer, for the seat `seat` of game `g` with cursor state `ui`. Returns true
 // when an action was produced. Shared by offline play and the online client.
 static bool input_to_action(Game* g, int seat, TableUi* ui, const Input* in, Action* out) {
     if (seat < 0) return false;                                // full-AI game
@@ -266,9 +277,11 @@ static bool input_to_action(Game* g, int seat, TableUi* ui, const Input* in, Act
         if (in->throw_pressed)   { *out = (Action){ACTION_DISCARD, 0}; return true; }
     }
 
-    // Touch: taps against the zones the renderer captured last frame.
-    if (in->touch_tap) {
-        int hit = render_table_hit_test((Vector2){in->tap_x, in->tap_y});
+    // Touch / mouse: taps and clicks against the zones the renderer captured
+    // last frame.
+    Vector2 tp;
+    if (pointer_tap(in, &tp)) {
+        int hit = render_table_hit_test(tp);
         if (g->phase == PHASE_DRAW) {
             if (hit == HIT_STOCK)   { *out = (Action){ACTION_DRAW_STOCK, 0};   return true; }
             if (hit == HIT_DISCARD) { *out = (Action){ACTION_DRAW_DISCARD, 0}; return true; }
@@ -338,8 +351,9 @@ static void slot_cycle(char* slot, const char* alphabet, int dir) {
 // slot (or missed everything).
 static int picker_tap(const Input* in, char* slots, int nslots, int* cursor,
                       const char* alphabet) {
-    if (!in->touch_tap) return 0;
-    int hit = render_picker_hit_test((Vector2){in->tap_x, in->tap_y});
+    Vector2 tp;
+    if (!pointer_tap(in, &tp)) return 0;
+    int hit = render_picker_hit_test(tp);
     if (hit >= 0 && hit < nslots) {
         *cursor = hit;
         softkbd_reshow(); // the player may have put the keyboard away
@@ -391,7 +405,7 @@ static void type_into(TypeState* t, const Input* in, char* slots, int n, int* cu
 // Anything that moves the cursor or changes a slot by hand makes the keystroke
 // history meaningless.
 static void type_maybe_reset(TypeState* t, const Input* in) {
-    if (in->touch_tap || in->menu_left || in->menu_right || in->menu_up || in->menu_down)
+    if (in->touch_tap || in->left_pressed || in->menu_left || in->menu_right || in->menu_up || in->menu_down)
         type_reset(t);
 }
 
@@ -400,16 +414,6 @@ static const char* picker_hint(void) {
     if (softkbd_available()) return "TYPE, OR TAP A SLOT TO MOVE THE CURSOR";
     if (!render_use_portrait()) return "TYPE, OR USE THE ARROW KEYS";
     return "TAP A SLOT, THEN THE LETTER ABOVE OR BELOW IT";
-}
-
-// A menu row picked by the pointer: a completed tap, or a mouse click.
-static bool menu_pointer(const Input* in, Vector2* p) {
-    if (in->touch_tap) { *p = (Vector2){in->tap_x, in->tap_y}; return true; }
-    if (in->left_pressed) {
-        *p = (Vector2){(float)in->mouse_x, (float)in->mouse_y};
-        return true;
-    }
-    return false;
 }
 
 // Drive the online submenu one frame (plain navigation). Returns the chosen
@@ -426,7 +430,7 @@ static int online_menu(AppCtx* c, const Input* in) {
     }
     bool sel = in->select_pressed;
     Vector2 p;
-    if (menu_pointer(in, &p)) {
+    if (pointer_tap(in, &p)) {
         int hit = menu_hit_test(p);
         if (hit >= 0 && hit < ONLINE_ITEMS) { c->online_sel = hit; sel = true; }
     }
@@ -606,7 +610,7 @@ static void frame_step(void* arg) {
         // highlighted row.
         bool do_select = in.select_pressed;
         Vector2 p;
-        if (menu_pointer(&in, &p)) {
+        if (pointer_tap(&in, &p)) {
             int hit = menu_hit_test(p);
             if (hit >= 0 && hit < menu_count) { c->selected = hit; do_select = true; }
         }
@@ -669,7 +673,7 @@ static void frame_step(void* arg) {
         int dir = (in.menu_right ? 1 : 0) - (in.menu_left ? 1 : 0);
         bool do_select = in.select_pressed;
         Vector2 p;
-        if (menu_pointer(&in, &p)) {
+        if (pointer_tap(&in, &p)) {
             int hit = menu_hit_test(p);
             if (hit >= 0 && hit < opt_count) { c->selected = hit; do_select = true; }
         }
@@ -753,7 +757,7 @@ static void frame_step(void* arg) {
         // Round-over flow: first confirm shows the standings page, the second
         // starts the next round (or reveals the match result).
         if (g->phase == PHASE_ROUND_OVER) {
-            if (!phase_flipped && (in.confirm_pressed || in.touch_tap)) {
+            if (!phase_flipped && (in.confirm_pressed || in.touch_tap || in.left_pressed)) {
                 if (!c->ui.standings) {
                     c->ui.standings = true;
                     sound_play(SFX_MENU_MOVE);
@@ -765,7 +769,7 @@ static void frame_step(void* arg) {
                 }
             }
         } else if (g->phase == PHASE_MATCH_OVER) {
-            if (!phase_flipped && (in.confirm_pressed || in.touch_tap)) {
+            if (!phase_flipped && (in.confirm_pressed || in.touch_tap || in.left_pressed)) {
 #ifdef OR_AUTOPLAY
                 c->game = new_game(-1);
 #else
@@ -854,12 +858,12 @@ static void frame_step(void* arg) {
             play_event_sounds(&ng->game, ev);
             if (ng->game.phase == PHASE_ROUND_OVER) {
                 // First confirm shows standings; the second sends `next`.
-                if (in.confirm_pressed || in.touch_tap) {
+                if (in.confirm_pressed || in.touch_tap || in.left_pressed) {
                     if (!c->ui.standings) { c->ui.standings = true; sound_play(SFX_MENU_MOVE); }
                     else { netgame_confirm(ng); c->ui.standings = false; }
                 }
             } else if (ng->game.phase == PHASE_MATCH_OVER) {
-                if (in.confirm_pressed || in.touch_tap) {
+                if (in.confirm_pressed || in.touch_tap || in.left_pressed) {
                     netgame_close(ng);
                     c->state = STATE_MENU;
                     c->selected = 0;
@@ -957,9 +961,10 @@ int main(int argc, char** argv) {
     sound_init();
 
 #ifdef PLATFORM_WEB
-    // Pick the renderer by the primary pointer: coarse (phone/tablet) -> portrait
-    // touch layout; fine (desktop / 2-in-1 laptop) -> desktop landscape layout +
-    // keyboard, matching the native desktop app. Only pointer:coarse is used —
+    // Pick touch vs desktop by the primary pointer: coarse (phone/tablet) -> the
+    // layout fills the screen and takes taps; fine (desktop / 2-in-1 laptop) ->
+    // the layout sits in a centred column and takes the mouse and keyboard,
+    // matching the native desktop app. Only pointer:coarse is used —
     // the maxTouchPoints/ontouchstart backstops wrongly flipped touchscreen
     // laptops to the touch layout.
     render_set_portrait(emscripten_run_script_int(

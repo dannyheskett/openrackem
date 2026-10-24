@@ -2,11 +2,9 @@
 #define OPENRACKEM_RENDER_INTERNAL_H
 
 // Private interface shared between the renderer translation units:
-//   render.c           — common state, shared draw helpers, lifecycle, dispatch
-//   render_portrait.c  — the portrait (touch) renderer    (body under OR_PORTRAIT)
-//   render_landscape.c — the landscape (desktop) renderer (body under OR_LANDSCAPE)
-// render_portrait/landscape.c compile to empty objects on platforms that don't
-// use them, so all three can sit in the build's source list unconditionally.
+//   render.c           — common state, shared draw helpers, lifecycle
+//   render_portrait.c  — the table renderer (full screen on phones, a centred
+//                        column on desktop)
 
 #include "render.h"
 #include "gfx.h"
@@ -63,9 +61,16 @@ float anim_progress(const Game* g);
 // Interpolate a card between two rects at progress t and draw it.
 void draw_flying_card(Rectangle from, Rectangle to, float t, int value, bool face_up);
 
-// Table hit zones for touch (captured per frame; read by render_table_hit_test).
+// Table hit zones for touch and mouse (captured per frame; read by
+// render_table_hit_test).
 void table_hits_reset(void);
 void table_hit_set(int id, Rectangle r);   // id: 0..9 slots, HIT_STOCK, HIT_DISCARD
+
+// Hit capture is on by default; the renderer turns it off for the recorder's
+// fixed-size pass so only the window's geometry is ever hit-tested. The offset
+// maps rectangles drawn inside the desktop column into window pixels.
+void hit_capture_enable(bool on);
+void hit_offset_set(float ox, float oy);
 
 // Rounded rectangle with the corner radius in pixels (clamped to half the
 // shorter side), over gfx_rect_rounded's roundness fraction.
@@ -73,7 +78,7 @@ void rect_rounded_px(int x, int y, int w, int h, int radius, Color color);
 
 // Computed slot-picker geometry + its shared drawer (defined in render.c),
 // filled by each renderer from its own sizing. `capture` records the
-// slot and button rectangles for touch; landscape passes false.
+// slot and button rectangles as tap / click targets (window pass only).
 typedef struct {
     int cx, px, py, panel_w, panel_h;
     int title_size, title_y;
@@ -86,21 +91,11 @@ void draw_picker_panel(PickerLayout p, const char* title, const char* slots,
                        int cursor, const char* alphabet, const char* hint,
                        const char* ok_label, bool capture);
 
-// Per-renderer entry points (defined in render_portrait/landscape.c), called by
-// the OR_DISPATCH macro in render.c.
-#ifdef OR_PORTRAIT
+// The table renderer's entry points (render_portrait.c), called by render.c.
 void render_frame_portrait(const Game* game, const TableUi* ui);
 void render_pause_portrait(const Game* game, const TableUi* ui);
 void render_picker_portrait(const char* title, const char* slots, int cursor,
                             const char* alphabet, const char* hint,
                             const char* ok_label);
-#endif
-#ifdef OR_LANDSCAPE
-void render_frame_landscape(const Game* game, const TableUi* ui);
-void render_pause_landscape(const Game* game, const TableUi* ui);
-void render_picker_landscape(const char* title, const char* slots, int cursor,
-                             const char* alphabet, const char* hint,
-                             const char* ok_label);
-#endif
 
 #endif // OPENRACKEM_RENDER_INTERNAL_H

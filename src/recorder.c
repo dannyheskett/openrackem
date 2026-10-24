@@ -51,7 +51,7 @@ static mp4_h26x_writer_t s_writer;
 static FILE*             s_fout = NULL;
 static int               s_frame = 0;
 
-// BT.601 limited-range RGB -> I420. No padding (640x480 are /16). Reused per
+// BT.601 limited-range RGB -> I420. No padding (REC_W x REC_H are /16). Reused per
 // frame against the persistent s_yuv planes.
 static void rgba_to_i420(const unsigned char* rgba) {
     unsigned char* y = s_io.yuv[0];

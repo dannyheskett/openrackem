@@ -1,6 +1,5 @@
 // Common renderer TU: shared state and draw helpers, lifecycle, and the public
-// entry points that dispatch to the active renderer. The two renderers live in
-// render_portrait.c and render_landscape.c.
+// entry points. The table renderer itself lives in render_portrait.c.
 #include "render_internal.h"
 #include "menu.h"
 #include "present.h"
@@ -11,16 +10,18 @@
 #include <raylib.h>  // window/timing (InitWindow, …); absent on iOS
 #endif
 
-// render_use_portrait() reports the active renderer. Native builds have exactly
-// one (compile-time constant); the web build has both and picks at runtime.
-#if defined(OR_RUNTIME_RENDERER)
+// render_use_portrait() reports whether this is a touch device (the layout
+// fills the screen) or a desktop (the layout sits in a centred column, driven
+// by mouse and keyboard). Native builds know at compile time; the web build
+// decides at startup from the browser's pointer.
+#if defined(PLATFORM_WEB)
 static bool s_portrait_mode = false;
 void render_set_portrait(bool portrait) { s_portrait_mode = portrait; }
 bool render_use_portrait(void) { return s_portrait_mode; }
-#elif defined(OR_PORTRAIT)
-bool render_use_portrait(void) { return true; }   // Android / iOS: portrait only
+#elif defined(PLATFORM_ANDROID) || defined(PLATFORM_IOS)
+bool render_use_portrait(void) { return true; }
 #else
-bool render_use_portrait(void) { return false; }  // desktop native: landscape only
+bool render_use_portrait(void) { return false; }  // desktop native
 #endif
 
 // Table palette, named for clarity (shared with both renderers). A dark felt
@@ -219,7 +220,7 @@ void draw_center_panel_at(int w, int h, int panel_w, int panel_h, int ts,
     }
 }
 
-// --- Touch hit zones -------------------------------------------------------
+// --- Touch / mouse hit zones -------------------------------------------------
 // Table rectangles captured by the last render_frame (rack slots + piles) and
 // menu item rectangles captured by the last render_menu. Written by the active
 // renderer, read by the hit-test entry points below.
@@ -227,13 +228,28 @@ void draw_center_panel_at(int w, int h, int panel_w, int panel_h, int ts,
 static Rectangle s_table_rects[TABLE_ZONES];
 static bool      s_table_valid[TABLE_ZONES];
 
+static bool  s_hits_on = true;
+static float s_hit_ox = 0.0f, s_hit_oy = 0.0f;
+
+void hit_capture_enable(bool on) { s_hits_on = on; }
+
+void hit_offset_set(float ox, float oy) {
+    s_hit_ox = ox;
+    s_hit_oy = oy;
+}
+
+static Rectangle hit_to_window(Rectangle r) {
+    return (Rectangle){ r.x + s_hit_ox, r.y + s_hit_oy, r.width, r.height };
+}
+
 void table_hits_reset(void) {
+    if (!s_hits_on) return;
     for (int i = 0; i < TABLE_ZONES; i++) s_table_valid[i] = false;
 }
 
 void table_hit_set(int id, Rectangle r) {
-    if (id < 0 || id >= TABLE_ZONES) return;
-    s_table_rects[id] = r;
+    if (!s_hits_on || id < 0 || id >= TABLE_ZONES) return;
+    s_table_rects[id] = hit_to_window(r);
     s_table_valid[id] = true;
 }
 
@@ -271,7 +287,7 @@ static int       s_pick_count = 0;
 static void pick_capture(int id, Rectangle r) {
     if (s_pick_count >= (int)(sizeof s_pick_ids / sizeof s_pick_ids[0])) return;
     s_pick_ids[s_pick_count]   = id;
-    s_pick_rects[s_pick_count] = r;
+    s_pick_rects[s_pick_count] = hit_to_window(r);
     s_pick_count++;
 }
 
@@ -321,6 +337,7 @@ void draw_picker_panel(PickerLayout L, const char* title, const char* slots,
     if (n < 1) return;
     if (cursor < 0) cursor = 0;
     if (cursor >= n) cursor = n - 1;
+    capture = capture && s_hits_on;
     if (capture) s_pick_count = 0;
 
     gfx_rect(L.px, L.py, L.panel_w, L.panel_h, (Color){15, 15, 25, 255});
@@ -410,18 +427,8 @@ void render_cleanup(void) {
 }
 
 // --- Public entry points ---------------------------------------------------
-// Dispatch to the active renderer: compile-time on native builds that have only
-// one, runtime on web, which has both.
-#if defined(OR_RUNTIME_RENDERER)
-  #define OR_DISPATCH(fn, ...) do { if (s_portrait_mode) fn##_portrait(__VA_ARGS__); else fn##_landscape(__VA_ARGS__); } while (0)
-#elif defined(OR_PORTRAIT)
-  #define OR_DISPATCH(fn, ...) fn##_portrait(__VA_ARGS__)
-#else
-  #define OR_DISPATCH(fn, ...) fn##_landscape(__VA_ARGS__)
-#endif
-
-void render_frame(const Game* game, const TableUi* ui) { OR_DISPATCH(render_frame, game, ui); }
-void render_pause(const Game* game, const TableUi* ui) { OR_DISPATCH(render_pause, game, ui); }
+void render_frame(const Game* game, const TableUi* ui) { render_frame_portrait(game, ui); }
+void render_pause(const Game* game, const TableUi* ui) { render_pause_portrait(game, ui); }
 void render_menu(const char* title, const char* const* items, int count,
                  int selected, int gap_before) {
     MenuTheme t = menu_theme();
@@ -429,5 +436,5 @@ void render_menu(const char* title, const char* const* items, int count,
 }
 void render_picker(const char* title, const char* slots, int cursor,
                    const char* alphabet, const char* hint, const char* ok_label) {
-    OR_DISPATCH(render_picker, title, slots, cursor, alphabet, hint, ok_label);
+    render_picker_portrait(title, slots, cursor, alphabet, hint, ok_label);
 }

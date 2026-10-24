@@ -23,7 +23,8 @@ typedef struct {
     bool pause_pressed;         // Enter (the loop uses it when nothing confirms)
 
     // Mouse (desktop, and the web build's desktop layout): a click on a menu
-    // row chooses it.
+    // row, a picker control or a table zone (stock, discard, rack slot) acts
+    // like a tap there.
     int  mouse_x, mouse_y;
     bool left_pressed;    // left button just went down
 
