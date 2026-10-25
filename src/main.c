@@ -411,9 +411,12 @@ static void type_maybe_reset(TypeState* t, const Input* in) {
 
 // The picker's hint line: how to edit on this device.
 static const char* picker_hint(void) {
-    if (softkbd_available()) return "TYPE, OR TAP A SLOT TO MOVE THE CURSOR";
-    if (!render_use_portrait()) return "TYPE, OR USE THE ARROW KEYS";
-    return "TAP A SLOT, THEN THE LETTER ABOVE OR BELOW IT";
+    bool touch = render_use_portrait();
+    if (softkbd_keyboard_detected())
+        return touch ? "TYPE, OR TAP A SLOT TO MOVE THE CURSOR"
+                     : "TYPE, OR CLICK A SLOT TO MOVE THE CURSOR";
+    return touch ? "TAP A SLOT, THEN THE LETTER ABOVE OR BELOW IT"
+                 : "CLICK A SLOT, THEN THE LETTER ABOVE OR BELOW IT";
 }
 
 // Drive the online submenu one frame (plain navigation). Returns the chosen
@@ -495,7 +498,8 @@ static void name_edit_save(const AppCtx* c) {
 // The Name screen: the keyboard (physical, or the device's own on-screen one)
 // types alphanumerics into the slots and backspace deletes; a tap on a slot
 // moves the cursor there, and SAVE / CANCEL (or the keyboard's Done) leave.
-// Without an on-screen keyboard the spinner bands cycle the active letter.
+// Only without any keyboard (softkbd_keyboard_detected) do the spinner bands
+// appear to cycle the active letter.
 // Returns 1 to save+exit, -1 to cancel, 0 to stay.
 static int name_screen(AppCtx* c, const Input* in) {
     if (in->escape_pressed) return -1;
