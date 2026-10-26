@@ -19,7 +19,7 @@ SRC := src/main.c src/rules.c src/game.c src/ai.c src/tick.c src/input.c \
        src/safe_area.c src/menu.c src/present.c src/window.c \
        src/sound.c src/audio_raylib.c \
        src/netgame.c src/net_ws.c src/net_posix.c src/net_stub.c src/net_web.c \
-       src/net_win.c src/prefs.c src/softkbd.c \
+       src/net_win.c src/prefs.c src/softkbd.c src/online_ui.c src/share.c \
        src/recorder.c src/encode_h264.c src/encode_mux.c
 
 # Shared standard/warning flags and vendored-header include paths.
@@ -453,7 +453,7 @@ IOS_C_SRC      := src/rules.c src/game.c src/ai.c src/tick.c src/main.c \
                   src/render.c src/render_portrait.c \
                   src/input.c src/sound.c src/recorder.c src/safe_area.c \
                   src/menu.c src/present.c src/window.c \
-                  src/netgame.c src/prefs.c src/softkbd.c
+                  src/netgame.c src/prefs.c src/softkbd.c src/online_ui.c src/share.c
 IOS_MM_SRC     := ios/ios_main.mm ios/gfx_metal.mm ios/plat_ios.mm ios/audio_ios.mm
 # The online client (net_apple.mm, Network.framework) is Obj-C++ compiled
 # WITHOUT ARC (it hand-retains nw_/dispatch objects held in a C struct), so it
@@ -719,7 +719,7 @@ $(NET_MULTI_BIN): tests/net_multi.c src/netgame.c src/net_ws.c src/net_posix.c \
 # Live-server smoke test: two headless clients connect to the REAL deployed
 # daemon and create+join a game, proving the wss/TLS transport end to end.
 # Linux variant links net_posix + system OpenSSL. Needs network egress to
-# openrackem-server.fly.dev; override with H=/P=/TLS=.
+# openrackem-rooms.fly.dev; override with H=/P=/TLS=.
 NET_LIVE_BIN := build/net_live
 
 net-live: $(NET_LIVE_BIN)

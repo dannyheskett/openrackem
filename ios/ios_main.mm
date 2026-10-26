@@ -187,6 +187,21 @@ extern "C" void plat_ios_set_keyboard(bool visible) {
     [s_view setKeyboardVisible:visible ? YES : NO];
 }
 
+// The system share sheet with a private room's invite line (src/share.c).
+// Called on the main thread (the CADisplayLink frame), as UIKit requires.
+extern "C" void plat_ios_share(const char* text) {
+    UIViewController* root = s_view.window.rootViewController;
+    if (!root || !text) return;
+    NSString* str = [NSString stringWithUTF8String:text];
+    UIActivityViewController* sheet =
+        [[UIActivityViewController alloc] initWithActivityItems:@[str] applicationActivities:nil];
+    // iPad presents the sheet as a popover, which needs an anchor.
+    sheet.popoverPresentationController.sourceView = root.view;
+    sheet.popoverPresentationController.sourceRect =
+        CGRectMake(CGRectGetMidX(root.view.bounds), CGRectGetMidY(root.view.bounds), 1, 1);
+    [root presentViewController:sheet animated:YES completion:nil];
+}
+
 @interface AppDelegate : UIResponder <UIApplicationDelegate>
 @property (strong, nonatomic) UIWindow* window;
 @end
@@ -204,9 +219,13 @@ extern "C" void plat_ios_set_keyboard(bool visible) {
     [self.window makeKeyAndVisible];
 
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
-        object:nil queue:nil usingBlock:^(NSNotification* n){ (void)n; plat_ios_set_focus(true); }];
+        object:nil queue:nil usingBlock:^(NSNotification* n){
+            (void)n; plat_ios_set_focus(true); app_on_foreground(); }];
+    // Frames may never run again after resign (iOS suspends the app soon
+    // after), so the online session hears about it here, synchronously.
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationWillResignActiveNotification
-        object:nil queue:nil usingBlock:^(NSNotification* n){ (void)n; plat_ios_set_focus(false); }];
+        object:nil queue:nil usingBlock:^(NSNotification* n){
+            (void)n; plat_ios_set_focus(false); app_on_background(); }];
     return YES;
 }
 

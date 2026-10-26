@@ -1,15 +1,15 @@
 // Live-server smoke test for a net.h backend: two headless clients connect to
-// the real deployed daemon, create + join a room (which auto-starts, no queue
-// wait), and confirm the full transport works — the wss/TLS handshake, the
+// the real deployed daemon, create + join a private room and ready up, and
+// confirm the full transport works — the wss/TLS handshake, the
 // protocol, and bidirectional message flow (both clients receive authoritative
 // state). Optionally (OR_LIVE_FULLMATCH=1) plays the whole match with the AI.
 //
 // Portable across backends: it drives everything through netgame/net.h, so the
 // Makefile links whichever net_*.c the platform uses (net_posix+OpenSSL on
 // Linux, net_apple+Network.framework on macOS). This is how the macOS CI job
-// functionally verifies net_apple.mm against openrackem-server.fly.dev.
+// functionally verifies net_apple.mm against openrackem-rooms.fly.dev.
 //
-// Env: H=host (default openrackem-server.fly.dev), P=port (443), TLS=1.
+// Env: H=host (default openrackem-rooms.fly.dev), P=port (443), TLS=1.
 // Exit 0 = both clients reached a live game (and finished, if full-match).
 #define _POSIX_C_SOURCE 200809L
 
@@ -32,7 +32,7 @@ static void ms(int m) {
 #endif
 
 int main(void) {
-    const char* host = getenv("H") ? getenv("H") : "openrackem-server.fly.dev";
+    const char* host = getenv("H") ? getenv("H") : "openrackem-rooms.fly.dev";
     int  port = getenv("P")   ? atoi(getenv("P")) : 443;
     bool tls  = getenv("TLS") ? atoi(getenv("TLS")) != 0 : true;
     bool full = getenv("OR_LIVE_FULLMATCH") != NULL;
@@ -42,9 +42,15 @@ int main(void) {
 
     NetGame a, b;
     Rules r = rules_default();
-    r.player_count = 2;
     r.target_score = 50;
-    netgame_start(&a, host, port, tls, NG_JOIN_CREATE, NULL, &r, "Ava");
+    netgame_start(&a, host, port, tls, "Ava", NULL);
+    netgame_start(&b, host, port, tls, "Bo", NULL);
+    for (int i = 0; i < 5000 && (a.state != NG_IDLE || b.state != NG_IDLE); i++) {
+        netgame_update(&a); netgame_update(&b); ms(3);
+        if (a.state == NG_ERROR) { printf("FAIL: A error: %s\n", a.err); return 1; }
+        if (b.state == NG_ERROR) { printf("FAIL: B error: %s\n", b.err); return 1; }
+    }
+    netgame_create(&a, true, &r, false);
 
     // A creates the room; wait (bounded) for its code.
     for (int i = 0; i < 5000 && a.code[0] == '\0'; i++) {
@@ -54,7 +60,12 @@ int main(void) {
     if (a.code[0] == '\0') { printf("FAIL: no room code (connect failed)\n"); return 1; }
     printf("  created room %s\n", a.code);
 
-    netgame_start(&b, host, port, tls, NG_JOIN_CODE, a.code, NULL, "Bo");
+    netgame_join_code(&b, a.code);
+    for (int i = 0; i < 5000 && b.state != NG_LOBBY; i++) {
+        netgame_update(&a); netgame_update(&b); ms(3);
+    }
+    netgame_ready(&a, true);
+    netgame_ready(&b, true);
 
     // Both clients must reach a live game (state received => full round trip).
     int64_t deadline_steps = 20000;   // ~60s of pumping
@@ -85,7 +96,7 @@ int main(void) {
             } else if (ng->state == NG_PLAYING && ng->game.phase == PHASE_ROUND_OVER) {
                 netgame_confirm(ng);
             }
-            if (ng->state == NG_PLAYING && ng->game.phase == PHASE_MATCH_OVER) done++;
+            if (ng->result_pending && ng->game.phase == PHASE_MATCH_OVER) done++;
         }
         if (done == 2) over = true;
     }

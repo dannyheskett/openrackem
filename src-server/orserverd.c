@@ -8,6 +8,11 @@
 //
 // fly.io terminates TLS at its edge; this listens on plain TCP ($PORT,
 // default 8080) and trusts the Fly-Client-IP header for rate limiting.
+//
+// Persistence: with $OR_DATA_DIR set (the Fly volume, /data), the core's
+// snapshot — private rooms and every live match — is loaded at boot and
+// rewritten (tmp + rename) at most every SNAP_EVERY_MS while anything changed,
+// and once more on SIGTERM/SIGINT, so a deploy or restart doesn't end games.
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
 
@@ -29,8 +34,9 @@
 #include <unistd.h>
 
 #define IN_CAP   4096     // handshake headers / one batch of client frames
-#define OUT_CAP  16384    // ~a dozen queued state broadcasts; overflow = close
+#define OUT_CAP  32768    // a room list plus a burst of states; overflow = close
 #define TICK_MS  250      // core tick cadence (well under every core deadline)
+#define SNAP_EVERY_MS 5000  // snapshot spacing while the core is dirty
 
 typedef struct {
     int    fd;            // -1 = free slot
@@ -46,6 +52,11 @@ typedef struct {
 static Conn s_conns[SRV_MAX_CLIENTS];
 static int  s_epfd = -1;
 static Srv* s_core;
+static volatile sig_atomic_t s_stop = 0;
+static uint8_t* s_snap;           // snapshot buffer, sized once at startup
+static size_t   s_snap_cap;
+static char     s_snap_path[512]; // "" = persistence off
+static char     s_snap_tmp[520];
 
 static int64_t now_ms(void) {
     struct timespec ts;
@@ -158,9 +169,9 @@ static bool http_header(const char* req, size_t len, const char* name,
 }
 
 static void send_status(int idx, int64_t now) {
-    char body[192];
+    char body[256];
     srv_status_json(s_core, body, sizeof body, now);
-    char resp[384];
+    char resp[448];
     int n = snprintf(resp, sizeof resp,
                      "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
                      "Content-Length: %zu\r\nConnection: close\r\n\r\n%s",
@@ -253,6 +264,52 @@ static void handle_readable(int idx, int64_t now) {
     }
 }
 
+// --- Persistence ----------------------------------------------------------------
+static void on_signal(int sig) { (void)sig; s_stop = 1; }
+
+static bool write_all(int fd, const uint8_t* p, size_t n) {
+    while (n > 0) {
+        ssize_t w = write(fd, p, n);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            return false;
+        }
+        p += w;
+        n -= (size_t)w;
+    }
+    return true;
+}
+
+static void snapshot_save(int64_t now) {
+    if (!s_snap_path[0]) return;
+    size_t len = srv_snapshot(s_core, s_snap, s_snap_cap, now);
+    if (len == 0) { printf("snapshot: buffer too small\n"); return; }
+    int fd = open(s_snap_tmp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) { perror("snapshot open"); return; }
+    bool ok = write_all(fd, s_snap, len) && fsync(fd) == 0;
+    close(fd);
+    if (!ok || rename(s_snap_tmp, s_snap_path) != 0) {
+        perror("snapshot write");
+        unlink(s_snap_tmp);
+    }
+}
+
+static void snapshot_load(int64_t now) {
+    if (!s_snap_path[0]) return;
+    int fd = open(s_snap_path, O_RDONLY);
+    if (fd < 0) { printf("snapshot: none at %s\n", s_snap_path); return; }
+    size_t len = 0;
+    for (;;) {
+        if (len == s_snap_cap) { len = 0; break; }   // larger than any valid image
+        ssize_t r = read(fd, s_snap + len, s_snap_cap - len);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) break;
+        len += (size_t)r;
+    }
+    close(fd);
+    if (!srv_restore(s_core, s_snap, len, now)) printf("snapshot: discarded\n");
+}
+
 // --- main ---------------------------------------------------------------------
 int main(void) {
     signal(SIGPIPE, SIG_IGN);
@@ -266,6 +323,20 @@ int main(void) {
     }
     SrvIo io = {io_send, io_kick, io_log, NULL};
     s_core = srv_create(&io, seed);
+
+    const char* dir = getenv("OR_DATA_DIR");
+    if (dir && dir[0]) {
+        snprintf(s_snap_path, sizeof s_snap_path, "%s/rooms.dat", dir);
+        snprintf(s_snap_tmp, sizeof s_snap_tmp, "%s.tmp", s_snap_path);
+        s_snap_cap = srv_snapshot_cap();
+        s_snap = malloc(s_snap_cap);
+        if (!s_snap) { perror("snapshot buffer"); return 1; }
+        snapshot_load(now_ms());
+    }
+    struct sigaction sa_stop = {0};
+    sa_stop.sa_handler = on_signal;
+    sigaction(SIGTERM, &sa_stop, NULL);
+    sigaction(SIGINT, &sa_stop, NULL);
 
     int port = 8080;
     const char* pe = getenv("PORT");
@@ -295,10 +366,17 @@ int main(void) {
     fflush(stdout);
 
     int64_t last_tick = now_ms();
+    int64_t last_snap = last_tick;
     struct epoll_event evs[128];
     for (;;) {
         int n = epoll_wait(s_epfd, evs, 128, TICK_MS);
+        if (n < 0) n = 0;   // EINTR (a signal): fall through to the stop check
         int64_t now = now_ms();
+        if (s_stop) {
+            snapshot_save(now);
+            printf("orserverd: stopping (snapshot %s)\n", s_snap_path[0] ? "saved" : "off");
+            return 0;
+        }
 
         for (int e = 0; e < n; e++) {
             if (evs[e].data.u32 == UINT32_MAX) {
@@ -351,6 +429,11 @@ int main(void) {
             for (int i = 0; i < SRV_MAX_CLIENTS; i++) {
                 if (s_conns[i].fd >= 0 && s_conns[i].kill) close_conn(i, now);
             }
+        }
+
+        if (now - last_snap >= SNAP_EVERY_MS) {
+            last_snap = now;
+            if (srv_dirty(s_core)) snapshot_save(now);
         }
     }
 }

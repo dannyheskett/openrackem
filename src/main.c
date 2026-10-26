@@ -19,7 +19,9 @@
 #endif
 
 #include "netgame.h"
+#include "online_ui.h"
 #include "prefs.h"
+#include "share.h"
 #include "softkbd.h"
 
 typedef enum {
@@ -28,14 +30,23 @@ typedef enum {
     STATE_NAME,         // editing the persisted player name
     STATE_PLAYING,
     STATE_PAUSED,
-    STATE_ONLINE_MENU,  // choose quick / create / join (net builds only)
-    STATE_ONLINE_JOIN,  // entering a room code
-    STATE_ONLINE,       // connected: lobby, waiting, or a live online match
+    STATE_ONLINE,       // Play Online: room list, waiting room, or a live match
 } AppState;
+
+// Screens within STATE_ONLINE that the session state alone doesn't decide.
+typedef enum {
+    OS_LIST = 0,      // the room list (session idle)
+    OS_NEW_ROOM,      // New Room: public or private
+    OS_CODE,          // entering a private room code
+    OS_SETTINGS,      // the owner's room settings (in the waiting room)
+    OS_GAME_MENU,     // mid-match menu: resume / step away / forfeit
+    OS_FORFEIT,       // forfeit confirmation
+} OnlineScreen;
 
 // Menu actions. The set of items shown depends on whether a game is in
 // progress (a resumable game adds "Resume Game").
 typedef enum {
+    ACT_RETURN,
     ACT_RESUME,
     ACT_NEW,
     ACT_ONLINE,
@@ -45,9 +56,9 @@ typedef enum {
     ACT_EXIT,
 } MenuAction;
 
-// Upper bound on labels[]/actions[]: one slot per MenuAction (7). Each action
+// Upper bound on labels[]/actions[]: one slot per MenuAction (8). Each action
 // appears at most once, so build_menu can never overflow.
-#define MAX_MENU_ITEMS 7
+#define MAX_MENU_ITEMS 8
 
 // The Options screen exposes exactly what the plan allows: players, difficulty,
 // bonus scoring, partners, target score. Everything else stays at the official
@@ -89,6 +100,10 @@ static int build_menu(bool resumable, const char* labels[], MenuAction actions[]
                       int* gap_before) {
     int n = 0;
     *gap_before = -1;
+    // A seat held in a live online match comes first: one tap back to it.
+    if (net_available() && prefs_seat_key()[0]) {
+        labels[n] = "Return to Game"; actions[n++] = ACT_RETURN;
+    }
     if (resumable) { labels[n] = "Resume Game"; actions[n++] = ACT_RESUME; }
     labels[n] = "New Game"; actions[n++] = ACT_NEW;
     if (net_available()) { labels[n] = "Play Online"; actions[n++] = ACT_ONLINE; }
@@ -113,8 +128,9 @@ static int build_menu(bool resumable, const char* labels[], MenuAction actions[]
 
 // The Options screen items. Values cycle with Left/Right (or Select); the last
 // item returns to the menu. Labels are rebuilt every frame from the live Rules.
-#define OPT_ITEMS 7
-enum { OPT_NAME, OPT_PLAYERS, OPT_DIFFICULTY, OPT_BONUS, OPT_PARTNERS, OPT_TARGET, OPT_BACK };
+#define OPT_ITEMS 8
+enum { OPT_NAME, OPT_PLAYERS, OPT_DIFFICULTY, OPT_BONUS, OPT_PARTNERS, OPT_TARGET,
+       OPT_ROOM, OPT_BACK };
 
 static int build_options(const char* labels[]) {
     static char buf[OPT_ITEMS][32];
@@ -131,6 +147,10 @@ static int build_options(const char* labels[]) {
         snprintf(buf[OPT_PARTNERS], sizeof buf[0], "Partners: 4P only");
     }
     snprintf(buf[OPT_TARGET],     sizeof buf[0], "Play To: %d", r->target_score);
+    if (prefs_room_code()[0])
+        snprintf(buf[OPT_ROOM],   sizeof buf[0], "Room: %s (Forget)", prefs_room_code());
+    else
+        snprintf(buf[OPT_ROOM],   sizeof buf[0], "Room: none saved");
     snprintf(buf[OPT_BACK],       sizeof buf[0], "Back");
     for (int i = 0; i < OPT_ITEMS; i++) labels[i] = buf[i];
     return OPT_ITEMS;
@@ -239,9 +259,19 @@ typedef struct {
     SimClock clock;    // fixed-timestep accumulator (only advanced while playing)
     double prev_time;  // GetTime() at the previous frame; 0 before the first frame
     NetGame net;       // the online session (valid in STATE_ONLINE)
-    int online_sel;    // cursor on the online submenu
+    OnlineScreen ol_screen;   // which online screen, where the session doesn't decide
+    int ol_sel;        // cursor: room-list row / waiting-room button / menu row
+    int ol_scroll;     // room list: first public row shown
+    int ol_filter;     // room list: Play To filter (0 = any)
+    NgState ol_prev;   // session state last frame (to catch transitions)
+    long ol_last_room; // the public room we last left (cursor lands on it)
+    bool ol_away;      // we stepped away because the app lost focus
+    bool ol_was_focused;
+    bool name_then_online;    // the name screen was the gate to Play Online
+    char ol_notice[40];       // a local notice ("COPIED") ...
+    int  ol_notice_frames;    // ...and how long it stays up
     char join_code[8]; // code being entered on the Join screen
-    int code_cursor;   // active slot on the Join screen (0..5)
+    int code_cursor;   // active slot on the Join screen (0..3)
     char name_buf[16]; // player name being edited (STATE_NAME)
     int name_cursor;   // active slot on the Name screen (0..NAME_MAX-1)
     TypeState typing;  // keystroke history for whichever entry screen is up
@@ -299,18 +329,12 @@ static bool input_to_action(Game* g, int seat, TableUi* ui, const Input* in, Act
     return false;
 }
 
-// --- Online submenu + status --------------------------------------------------
-#define ONLINE_ITEMS 4
-enum { ONL_QUICK = 0, ONL_CREATE, ONL_JOIN, ONL_BACK };
-static const char* const ONLINE_LABELS[ONLINE_ITEMS] = {
-    "Quick Match", "Create Table", "Join by Code", "Back"
-};
-
+// --- Online ------------------------------------------------------------------
 // The daemon address. Defaults to the public deployment over wss:// so "Play
 // Online" works out of the box; override with the environment to reach a local
 // or self-hosted daemon (e.g. OPENRACKEM_SERVER=127.0.0.1 OPENRACKEM_PORT=8080,
 // which auto-selects plain ws:// on a non-443 port; force with OPENRACKEM_TLS).
-#define DEFAULT_SERVER "openrackem-server.fly.dev"
+#define DEFAULT_SERVER "openrackem-rooms.fly.dev"
 #define DEFAULT_PORT   443
 
 static const char* server_host(void) {
@@ -332,8 +356,9 @@ static bool server_tls(void) {
 }
 
 // The room-code alphabet the daemon uses (no ambiguous 0/O/1/I), for the Join
-// slot picker.
+// slot picker, and the length of a private room's code.
 static const char CODE_ALPHABET[] = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+#define CODE_LEN 4
 
 // Step one picker slot along its alphabet ring (+1 / -1, wrapping). Shared by
 // the room-code and name screens, which are the same widget over different
@@ -419,47 +444,26 @@ static const char* picker_hint(void) {
                  : "CLICK A SLOT, THEN THE LETTER ABOVE OR BELOW IT";
 }
 
-// Drive the online submenu one frame (plain navigation). Returns the chosen
-// item (ONL_*) on select, or -1.
-static int online_menu(AppCtx* c, const Input* in) {
-    if (in->escape_pressed) return ONL_BACK;
-    if (in->menu_up) {
-        c->online_sel = (c->online_sel + ONLINE_ITEMS - 1) % ONLINE_ITEMS;
-        sound_play(SFX_MENU_MOVE);
-    }
-    if (in->menu_down) {
-        c->online_sel = (c->online_sel + 1) % ONLINE_ITEMS;
-        sound_play(SFX_MENU_MOVE);
-    }
-    bool sel = in->select_pressed;
-    Vector2 p;
-    if (pointer_tap(in, &p)) {
-        int hit = menu_hit_test(p);
-        if (hit >= 0 && hit < ONLINE_ITEMS) { c->online_sel = hit; sel = true; }
-    }
-    return sel ? c->online_sel : -1;
-}
-
-// The Join-by-code entry screen: a 6-slot code picked from the daemon's
-// alphabet. Left/Right move the cursor, Up/Down cycle the letter, confirm
-// joins. Returns 1 to join, -1 to go back, 0 to stay.
+// The Enter Code screen: a 4-slot private room code picked from the
+// daemon's alphabet. Left/Right move the cursor, Up/Down cycle the letter,
+// confirm joins. Returns 1 to join, -1 to go back, 0 to stay.
 static int join_screen(AppCtx* c, const Input* in) {
     if (in->escape_pressed) return -1;
     if (c->join_code[0] == '\0') {
-        for (int i = 0; i < 6; i++) c->join_code[i] = 'A';
-        c->join_code[6] = '\0';
+        for (int i = 0; i < CODE_LEN; i++) c->join_code[i] = 'A';
+        c->join_code[CODE_LEN] = '\0';
     }
     // Keyboard (physical or on-screen): type the code directly, filtered to
     // the room-code alphabet. Coexists with the slot picker.
     type_maybe_reset(&c->typing, in);
-    type_into(&c->typing, in, c->join_code, 6, &c->code_cursor, CODE_ALPHABET, 'A');
-    if (in->menu_left)  c->code_cursor = (c->code_cursor + 5) % 6;
-    if (in->menu_right) c->code_cursor = (c->code_cursor + 1) % 6;
+    type_into(&c->typing, in, c->join_code, CODE_LEN, &c->code_cursor, CODE_ALPHABET, 'A');
+    if (in->menu_left)  c->code_cursor = (c->code_cursor + CODE_LEN - 1) % CODE_LEN;
+    if (in->menu_right) c->code_cursor = (c->code_cursor + 1) % CODE_LEN;
     if (in->menu_up || in->menu_down) {
         slot_cycle(&c->join_code[c->code_cursor], CODE_ALPHABET, in->menu_up ? 1 : -1);
         sound_play(SFX_MENU_MOVE);
     }
-    int tap = picker_tap(in, c->join_code, 6, &c->code_cursor, CODE_ALPHABET);
+    int tap = picker_tap(in, c->join_code, CODE_LEN, &c->code_cursor, CODE_ALPHABET);
     if (tap != 0) return tap;
     if (in->confirm_pressed) return 1;
     return 0;
@@ -520,45 +524,556 @@ static int name_screen(AppCtx* c, const Input* in) {
     return 0;
 }
 
-// Render the online submenu / status. `code_cursor` (0..5, -1 hidden) shows
-// which Join slot is active.
-static void render_online(const AppCtx* c) {
+// What a server notice means, for the screens.
+static const char* notice_text(const char* code) {
+    static const struct { const char* code; const char* text; } T[] = {
+        {"no_room",   "NO SUCH ROOM"},
+        {"full",      "THAT ROOM IS FULL"},
+        {"started",   "THAT GAME HAS ALREADY STARTED"},
+        {"rate",      "TOO MANY TRIES - WAIT A MINUTE"},
+        {"team_full", "THAT TEAM IS FULL"},
+        {"no_seat",   "THAT GAME HAS ENDED"},
+        {"not_owner", "ONLY THE ROOM'S CREATOR CAN DO THAT"},
+        {"idle",      "YOU WERE MOVED OUT FOR NOT BEING READY"},
+        {"closed",    "THE ROOM CLOSED"},
+    };
+    for (size_t i = 0; i < sizeof T / sizeof T[0]; i++) {
+        if (strcmp(code, T[i].code) == 0) return T[i].text;
+    }
+    return NULL;
+}
+
+static void online_notice(AppCtx* c, const char* text) {
+    snprintf(c->ol_notice, sizeof c->ol_notice, "%s", text);
+    c->ol_notice_frames = 180;
+}
+
+// The line under the screen: a local notice first, then the server's.
+static const char* online_notice_line(const AppCtx* c) {
+    if (c->ol_notice_frames > 0) return c->ol_notice;
+    if (c->net.notice[0]) return notice_text(c->net.notice);
+    return NULL;
+}
+
+// Open the session. With `rejoin_key` the session goes straight back to that
+// seat (Return to Game); otherwise it lands on the room list. A seat still
+// held elsewhere rides along, to be surrendered if a different game is joined.
+static void online_begin(AppCtx* c, const char* rejoin_key) {
+    netgame_start(&c->net, server_host(), server_port(), server_tls(), prefs_name(),
+                  rejoin_key);
+    if (!rejoin_key) {
+        snprintf(c->net.stale_key, sizeof c->net.stale_key, "%s", prefs_seat_key());
+    }
+    c->ui = (TableUi){ .cursor = 0, .standings = false };
+    c->state = STATE_ONLINE;
+    c->ol_screen = OS_LIST;
+    c->ol_sel = 0;
+    c->ol_scroll = 0;
+    c->ol_prev = NG_CONNECTING;
+    c->ol_away = false;
+    c->ol_notice_frames = 0;
+}
+
+// Play Online needs a name: ask first if there isn't one.
+static void online_enter(AppCtx* c) {
+    if (prefs_name()[0]) {
+        online_begin(c, NULL);
+    } else {
+        c->name_then_online = true;
+        name_edit_begin(c);
+        c->state = STATE_NAME;
+    }
+}
+
+static void online_leave_to_menu(AppCtx* c) {
+    netgame_close(&c->net);   // mid-match this steps away; the seat is kept
+    c->state = STATE_MENU;
+    c->selected = 0;
+}
+
+// Keep the persisted bits in step with the session: the seat of a live match
+// (Return to Game), the saved private room, and its owner key.
+static void online_sync_prefs(AppCtx* c) {
+    NetGame* ng = &c->net;
+    bool dirty = false;
+    if (ng->state == NG_PLAYING && ng->key[0] && !ng->result_pending) {
+        if (strcmp(prefs_seat_key(), ng->key) != 0) { prefs_set_seat_key(ng->key); dirty = true; }
+    } else if ((ng->state == NG_LOBBY || strcmp(ng->notice, "no_seat") == 0) &&
+               prefs_seat_key()[0]) {
+        // Back in a waiting room (the match ended, or another game was
+        // joined), or the seat is gone: nothing left to return to.
+        prefs_set_seat_key("");
+        dirty = true;
+    }
+    if (ng->have_lobby && (ng->state == NG_LOBBY || ng->state == NG_PLAYING)) {
+        const NgLobby* L = &ng->lobby;
+        bool same = strcmp(prefs_room_code(), L->code) == 0;
+        if (L->priv && L->code[0] && !same) {
+            // A private room we created or joined becomes the saved room.
+            prefs_set_room(L->code, ng->owner);
+            dirty = true;
+        } else if (same && L->code[0]) {
+            if (ng->owner[0] && strcmp(prefs_room_owner(), ng->owner) != 0) {
+                prefs_set_room(L->code, ng->owner);
+                dirty = true;
+            } else if (!ng->owner[0] && prefs_room_owner()[0]) {
+                // Back in our own room in a later session: we still own it.
+                snprintf(ng->owner, sizeof ng->owner, "%s", prefs_room_owner());
+            }
+        }
+    }
+    if (dirty) prefs_save();
+}
+
+static void online_view(const AppCtx* c, OnlineView* v) {
     const NetGame* ng = &c->net;
-    if (c->state == STATE_ONLINE_MENU) {
-        render_menu("PLAY ONLINE", ONLINE_LABELS, ONLINE_ITEMS, c->online_sel, ONL_BACK);
+    memset(v, 0, sizeof *v);
+    v->ng = ng;
+    v->player = prefs_name();
+    v->saved_code = prefs_room_code();
+    v->has_return = prefs_seat_key()[0] != '\0';
+    v->sel = c->ol_sel;
+    v->scroll = c->ol_scroll;
+    v->filter = c->ol_filter;
+    v->notice = online_notice_line(c);
+    v->is_owner = ng->owner[0] != '\0';
+}
+
+static void online_invite(const AppCtx* c) {
+    char text[160];
+    const char* code = c->net.lobby.code;
+    snprintf(text, sizeof text,
+             "Join my Rack 'Em table: %s - https://danheskett.com/dist/openrackem/?room=%s",
+             code, code);
+    ShareResult r = share_text(text);
+    if (r == SHARE_COPIED) online_notice((AppCtx*)c, "INVITE COPIED - PASTE IT TO A FRIEND");
+    else if (r == SHARE_NONE) online_notice((AppCtx*)c, "SHARE THE CODE ON SCREEN");
+}
+
+// The two small menus over the online screens.
+#define NEW_ROOM_ITEMS 3
+static const char* const NEW_ROOM_LABELS[NEW_ROOM_ITEMS] = {
+    "Public (anyone can join)", "Private (by code)", "Back"
+};
+#define GAME_MENU_ITEMS 3
+static const char* const GAME_MENU_LABELS[GAME_MENU_ITEMS] = {
+    "Resume", "Step Away", "Forfeit"
+};
+#define FORFEIT_ITEMS 2
+static const char* const FORFEIT_LABELS[FORFEIT_ITEMS] = { "Keep Playing", "Forfeit" };
+
+// The owner's room settings, rebuilt each frame from the live waiting room.
+#define SET_ITEMS 6
+enum { SET_TARGET, SET_BONUS, SET_PARTNERS, SET_PRIVATE, SET_AWAY, SET_BACK };
+static int build_room_settings(const NgLobby* L, const char* labels[]) {
+    static char buf[SET_ITEMS][40];
+    snprintf(buf[SET_TARGET],   sizeof buf[0], "Play To: %d", L->target);
+    snprintf(buf[SET_BONUS],    sizeof buf[0], "Bonus Scoring: %s", L->bonus ? "On" : "Off");
+    snprintf(buf[SET_PARTNERS], sizeof buf[0], "Partners: %s", L->partners ? "On" : "Off");
+    snprintf(buf[SET_PRIVATE],  sizeof buf[0], "Room: %s", L->priv ? "Private" : "Public");
+    snprintf(buf[SET_AWAY],     sizeof buf[0], "If Someone Leaves: %s",
+             !L->priv ? "AI after 30s" : L->away_policy ? "Wait" : "AI after 30s");
+    snprintf(buf[SET_BACK],     sizeof buf[0], "Back");
+    for (int i = 0; i < SET_ITEMS; i++) labels[i] = buf[i];
+    return SET_ITEMS;
+}
+
+// Plain list navigation for the small menus: returns the chosen row or -1.
+static int menu_pick(int* sel, int count, const Input* in) {
+    if (in->menu_up)   { *sel = (*sel + count - 1) % count; sound_play(SFX_MENU_MOVE); }
+    if (in->menu_down) { *sel = (*sel + 1) % count; sound_play(SFX_MENU_MOVE); }
+    bool pick = in->select_pressed;
+    Vector2 p;
+    if (pointer_tap(in, &p)) {
+        int hit = menu_hit_test(p);
+        if (hit >= 0 && hit < count) { *sel = hit; pick = true; }
+    }
+    return pick ? *sel : -1;
+}
+
+static void activate_list_row(AppCtx* c, const OlRow* row) {
+    NetGame* ng = &c->net;
+    sound_play(SFX_MENU_SELECT);
+    switch (row->kind) {
+    case OLR_RETURN:
+        netgame_rejoin(ng, prefs_seat_key());
+        break;
+    case OLR_SAVED:
+        if (ng->peek.known && !ng->peek.ok && strcmp(ng->peek.code, prefs_room_code()) == 0) {
+            netgame_create(ng, true, current_options(), false);   // expired: a new one
+        } else {
+            netgame_join_code(ng, prefs_room_code());
+        }
+        break;
+    case OLR_NEW:
+        c->ol_screen = OS_NEW_ROOM;
+        c->ol_sel = 0;
+        break;
+    case OLR_CODE:
+        snprintf(c->join_code, sizeof c->join_code, "%s", prefs_room_code());
+        if (strlen(c->join_code) != CODE_LEN) c->join_code[0] = '\0';
+        c->code_cursor = 0;
+        type_reset(&c->typing);
+        c->ol_screen = OS_CODE;
+        break;
+    case OLR_BEST:
+        netgame_best(ng, c->ol_filter);
+        break;
+    case OLR_ROOM:
+        c->ol_last_room = ng->rooms[row->room].id;
+        netgame_join_room(ng, c->ol_last_room);
+        break;
+    }
+}
+
+static void online_list_input(AppCtx* c, const Input* in) {
+    static const int FILTERS[] = {0, 250, 500, 750, 1000};
+    NetGame* ng = &c->net;
+    OnlineView v;
+    online_view(c, &v);
+    OlRow rows[OL_MAX_ROWS];
+    int n = online_list_rows(&v, rows);
+    if (c->ol_sel >= n) c->ol_sel = n - 1;
+    if (c->ol_sel < 0) c->ol_sel = 0;
+
+    if (in->escape_pressed) { online_leave_to_menu(c); return; }
+    if (in->menu_up && c->ol_sel > 0) { c->ol_sel--; sound_play(SFX_MENU_MOVE); }
+    if (in->menu_down && c->ol_sel < n - 1) { c->ol_sel++; sound_play(SFX_MENU_MOVE); }
+    int fdir = (in->menu_right ? 1 : 0) - (in->menu_left ? 1 : 0);
+
+    Vector2 p;
+    bool activate = in->select_pressed;
+    if (pointer_tap(in, &p)) {
+        int hit = online_hit_test(p);
+        if (hit >= OL_HIT_ROW && hit < OL_HIT_ROW + n) { c->ol_sel = hit - OL_HIT_ROW; activate = true; }
+        else if (hit == OL_HIT_FILTER) fdir = 1;
+        else if (hit == OL_HIT_SHUFFLE) { netgame_shuffle(ng); sound_play(SFX_MENU_MOVE); }
+        else if (hit == OL_HIT_BACK) { online_leave_to_menu(c); return; }
+    }
+    if (fdir) {
+        int k = 0, nf = (int)(sizeof FILTERS / sizeof FILTERS[0]);
+        for (int i = 0; i < nf; i++) if (FILTERS[i] == c->ol_filter) k = i;
+        c->ol_filter = FILTERS[(k + nf + fdir) % nf];
+        netgame_list(ng, c->ol_filter);
+        sound_play(SFX_MENU_MOVE);
+    }
+    if (activate && n > 0) activate_list_row(c, &rows[c->ol_sel]);
+}
+
+static void activate_lobby_button(AppCtx* c, int id) {
+    NetGame* ng = &c->net;
+    const NgLobby* L = &ng->lobby;
+    sound_play(SFX_MENU_SELECT);
+    switch (id) {
+    case OLB_READY:    netgame_ready(ng, !L->ready[L->me]); break;
+    case OLB_FORCE:    netgame_force(ng); break;
+    case OLB_SWITCH:   netgame_team(ng, 1 - L->team[L->me]); break;
+    case OLB_SHARE:    online_invite(c); break;
+    case OLB_SETTINGS: c->ol_screen = OS_SETTINGS; c->ol_sel = 0; break;
+    case OLB_LEAVE:    netgame_leave(ng); break;
+    case OLB_ACCEPT:   netgame_swap_answer(ng, L->swap_from, true); break;
+    case OLB_DECLINE:  netgame_swap_answer(ng, L->swap_from, false); break;
+    }
+}
+
+static void online_lobby_input(AppCtx* c, const Input* in) {
+    NetGame* ng = &c->net;
+    OnlineView v;
+    online_view(c, &v);
+    int ids[8];
+    int n = online_lobby_buttons(&v, ids);
+    if (c->ol_sel >= n || c->ol_sel < 0) c->ol_sel = 0;
+
+    if (in->escape_pressed) {
+        if (ng->lobby.swap_from >= 0) netgame_swap_answer(ng, ng->lobby.swap_from, false);
+        else netgame_leave(ng);
         return;
     }
-    // STATE_ONLINE: playing, or a status card while connecting/waiting.
-    if (ng->state == NG_PLAYING && ng->have_game) {
-        render_frame(&ng->game, &c->ui);
+    if (in->menu_up || in->menu_left) { c->ol_sel = (c->ol_sel + n - 1) % n; sound_play(SFX_MENU_MOVE); }
+    if (in->menu_down || in->menu_right) { c->ol_sel = (c->ol_sel + 1) % n; sound_play(SFX_MENU_MOVE); }
+    Vector2 p;
+    if (pointer_tap(in, &p)) {
+        int hit = online_hit_test(p);
+        if (hit >= OL_HIT_MEMBER && hit < OL_HIT_MEMBER + MAX_PLAYERS) {
+            netgame_swap(ng, hit - OL_HIT_MEMBER);
+            online_notice(c, "SWAP REQUEST SENT");
+            sound_play(SFX_MENU_SELECT);
+        } else if (hit >= OL_HIT_BUTTON && hit < OL_HIT_BUTTON + 16) {
+            activate_lobby_button(c, hit - OL_HIT_BUTTON);
+        }
         return;
     }
+    if (in->select_pressed) activate_lobby_button(c, ids[c->ol_sel]);
+}
+
+static void online_settings_input(AppCtx* c, const Input* in) {
+    static const int TARGETS[] = {250, 500, 750, 1000};
+    NetGame* ng = &c->net;
+    NgLobby L = ng->lobby;
+    if (in->escape_pressed) { c->ol_screen = OS_LIST; c->ol_sel = 0; return; }
+    if (in->menu_up)   { c->ol_sel = (c->ol_sel + SET_ITEMS - 1) % SET_ITEMS; sound_play(SFX_MENU_MOVE); }
+    if (in->menu_down) { c->ol_sel = (c->ol_sel + 1) % SET_ITEMS; sound_play(SFX_MENU_MOVE); }
+    int dir = (in->menu_right ? 1 : 0) - (in->menu_left ? 1 : 0);
+    bool pick = in->select_pressed;
+    Vector2 p;
+    if (pointer_tap(in, &p)) {
+        int hit = menu_hit_test(p);
+        if (hit >= 0 && hit < SET_ITEMS) { c->ol_sel = hit; pick = true; }
+    }
+    if (pick && c->ol_sel == SET_BACK) { c->ol_screen = OS_LIST; c->ol_sel = 0; return; }
+    if (!dir && !pick) return;
+    if (!dir) dir = 1;
+    switch (c->ol_sel) {
+    case SET_TARGET: {
+        int k = 1, nt = (int)(sizeof TARGETS / sizeof TARGETS[0]);
+        for (int i = 0; i < nt; i++) if (TARGETS[i] == L.target) k = i;
+        L.target = TARGETS[(k + nt + dir) % nt];
+        break;
+    }
+    case SET_BONUS:    L.bonus = !L.bonus; break;
+    case SET_PARTNERS: L.partners = !L.partners; break;
+    case SET_PRIVATE:  L.priv = !L.priv; break;
+    case SET_AWAY:     if (L.priv) L.away_policy = !L.away_policy; break;
+    default: return;
+    }
+    netgame_settings(ng, L.target, L.bonus, L.partners, L.priv, L.away_policy != 0);
+    sound_play(SFX_MENU_SELECT);
+}
+
+static void online_play_input(AppCtx* c, const Input* in, unsigned ev) {
+    NetGame* ng = &c->net;
+    play_event_sounds(&ng->game, ev);
+    if (c->ol_screen == OS_GAME_MENU) {
+        if (in->escape_pressed) { c->ol_screen = OS_LIST; return; }
+        int pick = menu_pick(&c->ol_sel, GAME_MENU_ITEMS, in);
+        if (pick == 0) { c->ol_screen = OS_LIST; }
+        else if (pick == 1) { online_leave_to_menu(c); }
+        else if (pick == 2) { c->ol_screen = OS_FORFEIT; c->ol_sel = 0; }
+        return;
+    }
+    if (c->ol_screen == OS_FORFEIT) {
+        if (in->escape_pressed) { c->ol_screen = OS_LIST; return; }
+        int pick = menu_pick(&c->ol_sel, FORFEIT_ITEMS, in);
+        if (pick == 0) c->ol_screen = OS_LIST;
+        else if (pick == 1) {
+            netgame_forfeit(ng);
+            prefs_set_seat_key("");
+            prefs_save();
+            c->ol_screen = OS_LIST;
+            c->ol_sel = 0;
+        }
+        return;
+    }
+
+    // Escape steps away: the seat is kept and Return to Game brings you back.
+    if (in->escape_pressed) { online_leave_to_menu(c); return; }
+
+    // The absent-player banner's button.
+    Vector2 tp;
+    if (ng->wait_seat >= 0 && pointer_tap(in, &tp) &&
+        render_table_hit_test(tp) == HIT_LETAI) {
+        netgame_letai(ng, ng->wait_seat);
+        sound_play(SFX_MENU_SELECT);
+        return;
+    }
+
+    if (ng->game.phase == PHASE_ROUND_OVER) {
+        // First confirm shows standings; the second sends `next`.
+        if (in->confirm_pressed || in->touch_tap || in->left_pressed) {
+            if (!c->ui.standings) { c->ui.standings = true; sound_play(SFX_MENU_MOVE); }
+            else { netgame_confirm(ng); c->ui.standings = false; }
+        }
+        return;
+    }
+    if (ng->game.phase == PHASE_MATCH_OVER) return;   // the room follows at once
+
+    bool placing = netgame_my_turn(ng) && ng->game.phase == PHASE_PLACE;
+    if (in->pause_pressed && !placing) {
+        c->ol_screen = OS_GAME_MENU;
+        c->ol_sel = 0;
+        sound_play(SFX_PAUSE);
+        return;
+    }
+    Action a;
+    if (input_to_action(&ng->game, ng->my_seat, &c->ui, in, &a)) netgame_action(ng, a);
+}
+
+// One frame of Play Online.
+static void online_frame(AppCtx* c, const Input* in, double dt) {
+    NetGame* ng = &c->net;
+    unsigned ev = netgame_update(ng);
+    netgame_elapse(ng, (int)(dt * 1000.0));
+    if (c->ol_notice_frames > 0) c->ol_notice_frames--;
+    online_sync_prefs(c);
+
+    // Transitions the screens follow.
+    if (ng->state != c->ol_prev) {
+        if (ng->state == NG_IDLE) {
+            netgame_list(ng, c->ol_filter);
+            if (prefs_room_code()[0]) netgame_peek(ng, prefs_room_code());
+            if (c->ol_screen != OS_NEW_ROOM && c->ol_screen != OS_CODE) {
+                c->ol_screen = OS_LIST;
+                c->ol_sel = 0;
+            }
+        } else if (ng->state == NG_LOBBY || ng->state == NG_PLAYING) {
+            c->ol_screen = OS_LIST;   // i.e. no overlay: the session decides
+            c->ol_sel = 0;
+            c->ui = (TableUi){ .cursor = 0, .standings = false };
+        }
+        c->ol_prev = ng->state;
+    }
+    // Back on the list after leaving a room: the cursor lands on it.
+    if (ng->state == NG_IDLE && c->ol_screen == OS_LIST && c->ol_last_room && ng->have_rooms) {
+        OnlineView v;
+        online_view(c, &v);
+        OlRow rows[OL_MAX_ROWS];
+        int n = online_list_rows(&v, rows);
+        for (int i = 0; i < n; i++) {
+            if (rows[i].kind == OLR_ROOM && ng->rooms[rows[i].room].id == c->ol_last_room) {
+                c->ol_sel = i;
+            }
+        }
+        c->ol_last_room = 0;
+    }
+
+    switch (ng->state) {
+    case NG_ERROR:
+        if (strcmp(ng->err, "need_name") == 0 || strcmp(ng->err, "bad_name") == 0) {
+            netgame_close(ng);
+            if (strcmp(ng->err, "bad_name") == 0) prefs_set_name("");
+            c->name_then_online = true;
+            name_edit_begin(c);
+            c->state = STATE_NAME;
+        } else if (in->any_pressed && !in->fullscreen_toggle) {
+            c->state = STATE_MENU;
+            c->selected = 0;
+        }
+        break;
+    case NG_CONNECTING:
+    case NG_DISCONNECTED:
+        if (in->escape_pressed) online_leave_to_menu(c);
+        break;
+    case NG_IDLE:
+        if (c->ol_screen == OS_NEW_ROOM) {
+            if (in->escape_pressed) { c->ol_screen = OS_LIST; break; }
+            int pick = menu_pick(&c->ol_sel, NEW_ROOM_ITEMS, in);
+            if (pick == 0 || pick == 1) {
+                netgame_create(ng, pick == 1, current_options(), false);
+                sound_play(SFX_MENU_SELECT);
+            }
+            if (pick >= 0) { c->ol_screen = OS_LIST; c->ol_sel = 0; }
+        } else if (c->ol_screen == OS_CODE) {
+            int r = join_screen(c, in);
+            if (r < 0) { c->ol_screen = OS_LIST; break; }
+            if (r > 0) {
+                netgame_join_code(ng, c->join_code);
+                c->ol_screen = OS_LIST;
+                sound_play(SFX_MENU_SELECT);
+            }
+        } else {
+            online_list_input(c, in);
+        }
+        break;
+    case NG_LOBBY:
+        if (ng->result_pending) {
+            // The match result stays up until it's dismissed; then the room.
+            if (in->confirm_pressed || in->touch_tap || in->left_pressed || in->escape_pressed) {
+                netgame_dismiss_result(ng);
+                sound_play(SFX_MENU_SELECT);
+            }
+        } else if (c->ol_screen == OS_SETTINGS) {
+            online_settings_input(c, in);
+        } else {
+            online_lobby_input(c, in);
+        }
+        break;
+    case NG_PLAYING:
+        if (ng->have_game) online_play_input(c, in, ev);
+        else if (in->escape_pressed) online_leave_to_menu(c);
+        break;
+    }
+}
+
+// The app lost focus (backgrounded, tab hidden, window deactivated): an
+// online match steps away at once rather than burning turn clocks, and
+// comes back with the app.
+static void online_background(AppCtx* c) {
+    if (c->state != STATE_ONLINE || c->net.state != NG_PLAYING) return;
+    netgame_leave(&c->net);
+    if (c->net.conn) net_poll(c->net.conn);   // flush before the OS suspends us
+    c->ol_away = true;
+}
+
+static void online_foreground(AppCtx* c) {
+    if (!c->ol_away) return;
+    c->ol_away = false;
+    if (c->state == STATE_ONLINE) netgame_here(&c->net);
+}
+
+static void render_online_status(const AppCtx* c) {
+    const NetGame* ng = &c->net;
     char l0[48] = "", l1[48] = "";
     const char* title = "ONLINE";
     switch (ng->state) {
-    case NG_CONNECTING: snprintf(l0, sizeof l0, "Connecting..."); break;
-    case NG_LOBBY:      snprintf(l0, sizeof l0, "Connected"); break;
-    case NG_QUEUED:
-        snprintf(l0, sizeof l0, "Finding a match...");
-        snprintf(l1, sizeof l1, "Queue position %d", ng->queue_pos);
-        break;
-    case NG_WAITING:
-        title = "WAITING FOR PLAYERS";
-        snprintf(l0, sizeof l0, "Room code: %s", ng->code);
-        snprintf(l1, sizeof l1, "%d / %d joined", ng->joined, ng->players);
-        break;
+    case NG_CONNECTING:   snprintf(l0, sizeof l0, "Connecting..."); break;
     case NG_DISCONNECTED: snprintf(l0, sizeof l0, "Reconnecting..."); break;
     case NG_ERROR:
         title = "DISCONNECTED";
-        snprintf(l0, sizeof l0, "%s", ng->err[0] ? ng->err : "connection failed");
+        snprintf(l0, sizeof l0, "%s", strcmp(ng->err, "upgrade") == 0
+                 ? "Please update the app" : ng->err[0] ? ng->err : "connection failed");
         snprintf(l1, sizeof l1, "Press any key");
         break;
     default: break;
     }
-    const char* lines[2]; int n = 0;
+    const char* lines[2];
+    int n = 0;
     if (l0[0]) lines[n++] = l0;
     if (l1[0]) lines[n++] = l1;
     render_menu(title, lines, n, -1, -1);
+}
+
+static void render_online(AppCtx* c) {
+    NetGame* ng = &c->net;
+    OnlineView v;
+    switch (ng->state) {
+    case NG_IDLE:
+        if (c->ol_screen == OS_NEW_ROOM) {
+            render_menu("NEW ROOM", NEW_ROOM_LABELS, NEW_ROOM_ITEMS, c->ol_sel, NEW_ROOM_ITEMS - 1);
+        } else if (c->ol_screen == OS_CODE) {
+            render_picker("ENTER ROOM CODE", c->join_code, c->code_cursor, CODE_ALPHABET,
+                          picker_hint(), "JOIN");
+        } else {
+            online_view(c, &v);
+            online_render_list(&v);
+            c->ol_scroll = v.scroll;
+        }
+        break;
+    case NG_LOBBY:
+        if (ng->result_pending && ng->have_game) {
+            render_frame(&ng->game, &c->ui);
+        } else if (c->ol_screen == OS_SETTINGS) {
+            const char* labels[SET_ITEMS];
+            build_room_settings(&ng->lobby, labels);
+            render_menu("ROOM SETTINGS", labels, SET_ITEMS, c->ol_sel, SET_BACK);
+        } else {
+            online_view(c, &v);
+            online_render_lobby(&v);
+        }
+        break;
+    case NG_PLAYING:
+        if (!ng->have_game) { render_online_status(c); break; }
+        if (c->ol_screen == OS_GAME_MENU) {
+            render_menu("GAME", GAME_MENU_LABELS, GAME_MENU_ITEMS, c->ol_sel, -1);
+        } else if (c->ol_screen == OS_FORFEIT) {
+            render_menu("FORFEIT THIS MATCH?", FORFEIT_LABELS, FORFEIT_ITEMS, c->ol_sel, -1);
+        } else {
+            render_frame(&ng->game, &c->ui);
+        }
+        break;
+    default:
+        render_online_status(c);
+        break;
+    }
 }
 
 // One iteration of the game loop. `arg` is an AppCtx* (void* to match the
@@ -584,6 +1099,14 @@ static void frame_step(void* arg) {
     // Sampled every frame, not only while playing, so a stale "was focused"
     // cannot survive a menu visit and fire on the first frame of the next game.
     bool focus_lost = window_focus_lost();
+
+    // An online match steps away when the app loses focus and comes back with
+    // it. (iOS also signals this directly from the shell, since frames stop
+    // once the app is suspended; a repeat here is harmless.)
+    bool focused_now = IsWindowFocused();
+    if (c->ol_was_focused && !focused_now) online_background(c);
+    else if (!c->ol_was_focused && focused_now) online_foreground(c);
+    c->ol_was_focused = focused_now;
 
     Input in = input_poll();
     if (in.fullscreen_toggle) window_toggle_fullscreen();
@@ -620,6 +1143,10 @@ static void frame_step(void* arg) {
         }
         if (do_select) {
             switch (actions[c->selected]) {
+            case ACT_RETURN:
+                online_begin(c, prefs_seat_key());
+                sound_play(SFX_MENU_SELECT);
+                break;
             case ACT_RESUME:
                 c->state = STATE_PLAYING;
                 sound_play(SFX_MENU_SELECT);
@@ -633,8 +1160,7 @@ static void frame_step(void* arg) {
                 sound_play(SFX_MENU_SELECT);
                 break;
             case ACT_ONLINE:
-                c->state = STATE_ONLINE_MENU;
-                c->online_sel = 0;
+                online_enter(c);
                 sound_play(SFX_MENU_SELECT);
                 break;
             case ACT_OPTIONS:
@@ -689,8 +1215,14 @@ static void frame_step(void* arg) {
             name_edit_begin(c);
             c->state = STATE_NAME;
             sound_play(SFX_MENU_SELECT);
-        } else if (c->selected == OPT_NAME) {
-            // Name row: left/right don't cycle a value; only select opens it.
+        } else if (do_select && c->selected == OPT_ROOM) {
+            if (prefs_room_code()[0]) {
+                prefs_set_room("", NULL);
+                prefs_save();
+                sound_play(SFX_MENU_SELECT);
+            }
+        } else if (c->selected == OPT_NAME || c->selected == OPT_ROOM) {
+            // Name / room rows: left/right don't cycle a value.
         } else if (dir != 0 || do_select) {
             cycle_option(c->selected, dir ? dir : 1);
             sound_play(SFX_MENU_SELECT);
@@ -702,10 +1234,23 @@ static void frame_step(void* arg) {
         int res = name_screen(c, &in);
         if (res == 1) {
             name_edit_save(c);
-            c->state = STATE_OPTIONS;
             sound_play(SFX_MENU_SELECT);
+            if (c->name_then_online) {
+                // The name was the way into Play Online: carry on there.
+                c->name_then_online = false;
+                if (prefs_name()[0]) online_begin(c, NULL);
+                else { c->state = STATE_MENU; c->selected = 0; }
+            } else {
+                c->state = STATE_OPTIONS;
+            }
         } else if (res == -1) {
-            c->state = STATE_OPTIONS;
+            if (c->name_then_online) {
+                c->name_then_online = false;
+                c->state = STATE_MENU;
+                c->selected = 0;
+            } else {
+                c->state = STATE_OPTIONS;
+            }
         }
         break; // rendered by the per-state dispatch below
     }
@@ -813,88 +1358,31 @@ static void frame_step(void* arg) {
         }
         break;
 
-    case STATE_ONLINE_MENU: {
-        // Choose how to get into a game. Quick Match needs no code; Create
-        // hands back a code to share; Join enters one with the slot cursor.
-        int oc = online_menu(c, &in);
-        if (oc == ONL_BACK) { c->state = STATE_MENU; c->selected = 0; break; }
-        if (oc == ONL_JOIN) {
-            for (int i = 0; i < 6; i++) c->join_code[i] = 'A';
-            c->join_code[6] = '\0';
-            c->code_cursor = 0;
-            type_reset(&c->typing);
-            c->state = STATE_ONLINE_JOIN;
-            sound_play(SFX_MENU_SELECT);
-        } else if (oc >= 0) {
-            NgJoin j = (oc == ONL_CREATE) ? NG_JOIN_CREATE : NG_JOIN_QUICK;
-            netgame_start(&c->net, server_host(), server_port(), server_tls(), j,
-                          NULL, current_options(), prefs_name());
-            c->ui = (TableUi){ .cursor = 0, .standings = false };
-            c->state = STATE_ONLINE;
-            sound_play(SFX_MENU_SELECT);
-        }
+    case STATE_ONLINE:
+        online_frame(c, &in, dt);
         break; // rendered via the dispatch below
-    }
-
-    case STATE_ONLINE_JOIN: {
-        int r = join_screen(c, &in);
-        if (r < 0) { c->state = STATE_ONLINE_MENU; break; }
-        if (r > 0) {
-            netgame_start(&c->net, server_host(), server_port(), server_tls(),
-                          NG_JOIN_CODE, c->join_code, current_options(), prefs_name());
-            c->ui = (TableUi){ .cursor = 0, .standings = false };
-            c->state = STATE_ONLINE;
-            sound_play(SFX_MENU_SELECT);
-        }
-        break; // rendered via the dispatch below
-    }
-
-    case STATE_ONLINE: {
-        unsigned ev = netgame_update(&c->net);
-        NetGame* ng = &c->net;
-        if (in.escape_pressed) {
-            netgame_close(ng);
-            c->state = STATE_MENU;
-            c->selected = 0;
-            break;
-        }
-        if (ng->state == NG_PLAYING) {
-            play_event_sounds(&ng->game, ev);
-            if (ng->game.phase == PHASE_ROUND_OVER) {
-                // First confirm shows standings; the second sends `next`.
-                if (in.confirm_pressed || in.touch_tap || in.left_pressed) {
-                    if (!c->ui.standings) { c->ui.standings = true; sound_play(SFX_MENU_MOVE); }
-                    else { netgame_confirm(ng); c->ui.standings = false; }
-                }
-            } else if (ng->game.phase == PHASE_MATCH_OVER) {
-                if (in.confirm_pressed || in.touch_tap || in.left_pressed) {
-                    netgame_close(ng);
-                    c->state = STATE_MENU;
-                    c->selected = 0;
-                }
-            } else {
-                Action a;
-                if (input_to_action(&ng->game, ng->my_seat, &c->ui, &in, &a)) {
-                    netgame_action(ng, a);
-                }
-            }
-        } else if (ng->state == NG_ERROR) {
-            // Any key returns to the menu once the failure is shown.
-            if (in.any_pressed && !in.fullscreen_toggle) { c->state = STATE_MENU; c->selected = 0; }
-        }
-        break;
-    }
     }
 
     // The device's keyboard is up exactly while a text-entry screen is.
-    softkbd_set_visible(c->state == STATE_NAME || c->state == STATE_ONLINE_JOIN);
+    softkbd_set_visible(c->state == STATE_NAME ||
+                        (c->state == STATE_ONLINE && c->net.state == NG_IDLE &&
+                         c->ol_screen == OS_CODE));
 
     // Online opponents show their chosen names (server handles); offline seats
     // fall back to "CPU N".
-    if (c->state == STATE_ONLINE && c->net.have_game)
-        render_set_seat_labels(c->net.handles, c->net.players);
-    else
+    if (c->state == STATE_ONLINE && c->net.have_game) {
+        const NetGame* ng = &c->net;
+        render_set_seat_labels(ng->handles, ng->players);
+        OnlineHud hud = { .on = true, .deadline_ms = ng->deadline_ms,
+                          .wait_seat = ng->wait_seat, .wait_ms = ng->wait_ms,
+                          .wait_timer = ng->wait_timer };
+        for (int i = 0; i < MAX_PLAYERS; i++) hud.away[i] = ng->ctl[i];
+        if (ng->back_frames > 0) snprintf(hud.back, sizeof hud.back, "%s", ng->back_name);
+        render_set_online_hud(&hud);
+    } else {
         render_clear_seat_labels();
+        render_set_online_hud(NULL);
+    }
 
     // Render for the state we ended the frame in. Every state must be handled
     // here: a same-frame transition (menu -> options) otherwise falls into a
@@ -910,11 +1398,8 @@ static void frame_step(void* arg) {
                       picker_hint(), "SAVE");
     } else if (c->state == STATE_PAUSED) {
         render_pause(c->game, &c->ui);
-    } else if (c->state == STATE_ONLINE_MENU || c->state == STATE_ONLINE) {
+    } else if (c->state == STATE_ONLINE) {
         render_online(c);
-    } else if (c->state == STATE_ONLINE_JOIN) {
-        render_picker("JOIN BY CODE", c->join_code, c->code_cursor, CODE_ALPHABET,
-                      picker_hint(), "JOIN");
     } else {
         render_frame(c->game, &c->ui);
     }
@@ -945,6 +1430,8 @@ void app_init(void) {
 }
 
 void app_frame(void) { frame_step(&ios_ctx); }
+void app_on_background(void) { online_background(&ios_ctx); }
+void app_on_foreground(void) { online_foreground(&ios_ctx); }
 
 #else
 

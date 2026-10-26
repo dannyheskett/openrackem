@@ -26,7 +26,7 @@
 #include <stdio.h>
 
 #define AP_MSGQ    32
-#define AP_MSG_CAP 2048
+#define AP_MSG_CAP 8192   // a full room list fits (server MSG_BUF)
 
 struct NetConn {
     nw_connection_t conn;          // retained; NULL after close
@@ -146,7 +146,14 @@ NetConn* net_connect(const char* host, int port, const char* path, bool tls) {
         case nw_connection_state_cancelled:
             set_status(c, NET_CLOSED);
             break;
-        default:   // invalid / waiting / preparing
+        case nw_connection_state_waiting:
+            // No usable path (typically after the app was suspended and the
+            // network moved on). Network.framework would sit here retrying
+            // while the game showed a frozen table; failing lets the session
+            // reconnect and rejoin by its member key instead.
+            set_status(c, NET_ERROR);
+            break;
+        default:   // invalid / preparing
             break;
         }
     });

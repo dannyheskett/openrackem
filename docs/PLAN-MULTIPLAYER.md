@@ -4,17 +4,23 @@
 
 The hosted game-pool engine promised in PLAN.md §1: real people at the same
 table over the network, on every platform v1 ships (desktop, web, Android,
-iOS), cross-playing. Two ways in:
+iOS), cross-playing. Everything happens in **rooms** (protocol v2,
+2026-10-26; Quick Match and creator-started tables were v1):
 
-- **Play with friends:** create a table, share a short room code, others join.
-- **Quick match:** a public queue that seats 2–4 strangers, backfilling empty
-  seats with AI after a short wait so a game always starts.
+- **Public rooms** are listed by who's in them and have no code; they exist
+  while anyone is in them.
+- **Private rooms** are unlisted, joined by a 4-character code, and last 30
+  days after their last match, so a group keeps one code.
+- A **waiting room** shows every name with a ready flag; when everyone
+  present (2–4) is ready, the match deals for exactly those players. After a
+  match the table returns to the same waiting room.
 
-Decisions taken (2026-08-26): authoritative **C daemon on fly.io** (a
-dedicated app on one tiny always-on machine — see `fly.toml`), **anonymous
-per-match session tokens** (no accounts), public matchmaking included. No chat and no user-entered names anywhere — seats get generated
-table handles — so the public mode carries **zero moderation surface**. AI
-takeover covers leavers and disconnects, so no penalty system exists either.
+Decisions taken (2026-08-26, revised 2026-10-26): authoritative **C daemon
+on fly.io** (a dedicated app on one tiny machine — see `fly.toml`),
+**anonymous member keys** (no accounts). Players choose a name (required to
+play online, checked against a small blocklist); there is no chat, so names
+are the only text strangers see. Leaving keeps your seat with an AI standing
+in, so no penalty system exists.
 
 Single-player v1 continues to work fully offline; multiplayer is a menu item,
 not a rewrite.
@@ -69,62 +75,61 @@ may see.
   threads, no allocation after startup; fixed pools (1024 rooms, 2048
   connections, ~40 MB total) bound everything.
 
-## 4. Protocol
+## 4. Protocol (v2)
 
-Client → server:
-
-| msg | fields | notes |
-|---|---|---|
-| `hello` | `v`, `client` | first message; server replies `welcome` or `upgrade` |
-| `create` | rules subset (players, bonus, partners, target) | returns a room code |
-| `join` | `code` | seat assigned in join order |
-| `quick` | preferred player count (or any) | enters the matchmaking queue |
-| `rejoin` | `seat_token` | resumes a live seat after a disconnect |
-| `action` | `type`, `slot` | v1's `Action`, verbatim |
-| `next_round` | — | the round-over confirm (any human may advance? no: each seat confirms; table advances when all connected humans confirmed or the reveal timer lapses) |
-| `leave` | — | seat degrades to AI immediately |
-
-Server → client:
+Client → server messages are flat JSON objects (≤ 8 keys, non-negative ints
+and identifier strings — `wire.c`); anything else closes the socket.
 
 | msg | fields | notes |
 |---|---|---|
-| `welcome` | `seat`, `seat_token`, `code`, `handles[]` | token is the only identity; valid for this match |
-| `state` | redacted game state, `events`, `last_action {seat, type, slot, card?}`, `deadline` | after every applied action and on join/rejoin |
-| `error` | `code`, `text` | includes illegal-action rejections |
+| `hello` | `v`=2, `name` | `need_name` / `bad_name` / `upgrade` errors |
+| `list` / `shuffle` / `unlist` | `target` (0 = any) | subscribe to `rooms` pushes |
+| `peek` | `code` | status of a private code (the saved-room row) |
+| `create` | `private`, `target`, `bonus`, `partners`, `away`, `key` | |
+| `join` | `room` (public id) or `code`, `key` | `key` surrenders a seat held elsewhere |
+| `best` | `target`, `key` | the joinable room closest to starting |
+| `rejoin` | `key` | back to a seat (Return to Game, reconnect) |
+| `ready` | `on` | waiting room |
+| `team` / `swap` / `swap_ok` / `swap_no` | `side` / `seat` | Partners teams; a swap needs consent |
+| `force` | — | private: Start without them |
+| `settings` | `owner`, rules, `private`, `away` | owner key required, waiting room only |
+| `action`, `next` | `a`, `slot` | as v1 |
+| `letai` | `seat` | hand an absent player's seat to the AI |
+| `leave` | — | waiting room: leave; match: step away (seat kept) |
+| `here` / `forfeit` | — | back from stepping away / give the seat up |
+| `ping` | — | every 10 s; 25 s of silence drops the client |
 
-**Redacted state** is the semantic fields of `Game`, filtered per seat by a
-new engine function (§6): own rack in full; opponents' racks as counts only —
-except in `PHASE_ROUND_OVER`/`MATCH_OVER`, when racks are public (the
-physical reveal); full discard pile (public information, as in
-`game_view_for`); held card under the existing visibility rule; never the
-stock contents, `rng`, or seed. `last_action` carries what an observer at a
-real table would see, and is what drives client sounds and card-flight
-animation.
+Server → client: `hi`, `rooms` (total + a sample of 20: ids, names, ready,
+rules), `peeked`, `lobby` (the waiting room: names, ready, teams, countdown,
+why it can't start, swap requests), `welcome` (member key, owner key for the
+creator), `state` (v1 fields + `ctl[]` away flags + the absent-player wait),
+`back`, `removed`, `error`.
+
+Redacted state is unchanged from v1: own rack in full, others only at the
+reveal, never the stock order, `rng`, or seed.
 
 ## 5. Server behavior
 
-- **Turn clock:** 45 s per decision (draw and place each). At expiry the
-  seat's move is played by `ai_choose` — the seat is *not* forfeited; the
-  token still owns it and any reconnect hands control back. A seat that has
-  timed out 3 consecutive times flips to AI until it acts again.
-- **Disconnects:** socket loss marks the seat absent; AI plays it; `rejoin`
-  with the token resumes. Seats stay reserved until the match ends.
-- **Quick match:** queue seats up to 4; a table launches when full, or after
-  15 s with ≥2 humans (AI backfill), or after 30 s with 1 human (they get an
-  ordinary AI game, served locally-equivalent). Preferred-count requests are
-  best-effort.
-- **Handles:** generated, not chosen — e.g. compass seats ("North") or a
-  small card-themed word list. No free text exists in the protocol.
-- **Pacing:** the engine is compiled with the pacing macros at zero; the
-  server sleeps ~1 s between AI actions at mixed tables so play stays
-  legible, and not at all at all-AI tables.
-- **Audit log:** per match, `(timestamp, seed, Rules, action list, seats)` —
-  a few hundred bytes. Kept N days for abuse/bug investigation, then deleted.
-  Written to stdout — on fly.io that is the log stream, and its retention
-  window is the expiry.
-- **Rate limits:** per-IP caps on `create`/`quick` (rooms are the only
-  resource an attacker can burn); per-connection message cap; oversized or
-  malformed frames close the socket.
+- **Starting:** everyone present ready, ≥ 2 players (Partners: exactly 4,
+  two teams of two) → 2 s countdown → deal. A new arrival or an un-ready
+  cancels it. Once everyone else has been ready 60 s, an idle player is
+  removed (public) or the ready players may Start without them (private).
+- **Turn clock:** 45 s per decision; at expiry the AI plays that decision; 3
+  consecutive timeouts hand the seat to the AI until the player acts.
+- **Leaving:** stepping away or dropping keeps the seat. At that player's
+  turn the table waits 30 s (or indefinitely, in a private room set to Wait),
+  any present player can hand the seat to the AI, and the AI plays it until
+  they return. With nobody present the match pauses; a public one is closed
+  after 5 min.
+- **Room list:** each viewer gets a stable sample of 20 joinable public rooms,
+  weighted toward fuller ones, refilled only as rooms fill, start, or empty;
+  pushed at most every 2 s.
+- **Durability:** private rooms and every live match are snapshotted to the
+  volume (`OR_DATA_DIR`) every few seconds and on shutdown and reloaded at
+  boot, so a deploy no longer ends games.
+- **Audit log:** per match, `(seed, Rules, action list, scores)` to stdout.
+- **Rate limits:** per-IP room creates; 10 wrong codes per minute per IP;
+  per-connection message cap; malformed frames close the socket.
 
 ## 6. Engine additions (all v1-compatible, all tiny)
 
@@ -149,25 +154,34 @@ phase, plus the seed/rng zeroing pinned. Nothing else in the engine changes.
   emscripten's WebSocket API on web, libwebsockets client (vendored, like
   minih264) on native. Compiled out of the iOS/Android builds until N2 lands
   there.
-- Menu grows **Play Online** → Quick Match / Create Table / Join Code (code
-  entry via the existing cursor UI; no keyboard text on touch — codes are
-  short and digit/letter cycled).
+- **Play Online** (name required) opens the room list: Return to Game, the
+  saved private room, New Room, Enter Code, Join Best Room, then public
+  rooms. Rooms open into the waiting room; Share sends a private room's
+  invite (share sheet on phones, clipboard on desktop). The saved room, its
+  owner key, and a live seat's member key persist in prefs.
 - In a network session the frame loop holds the latest redacted `Game` and
   renders it with the existing renderers (they already draw opponents as
   backs and respect held-card visibility). Input produces the same `Action`s;
   instead of `game_apply`, they go to the socket. `last_action` + `events`
   drive the existing sounds and flight animations.
-- The turn clock renders in the status line; "reconnecting…" overlays reuse
-  the pause panel.
+- The turn clock rides the turn line; away seats show an "AI" pill; the
+  absent-player wait is a banner with Let AI play; round screens show their
+  auto-advance countdown.
+- Losing focus steps away at once (iOS signals it from the app shell, since
+  frames stop on suspend) and returning reclaims the seat.
 
 ## 8. Operations and privacy
 
 - One static `orserverd` binary (`make server`) in a FROM-scratch image
   (`Dockerfile.server`), deployed with `fly deploy` on a shared-cpu-1x /
-  256 MB machine pinned to exactly one instance (`fly.toml` explains why);
-  `/status` (rooms live, queue depth, uptime) doubles as the health check.
-- No accounts, no names, no persistent identity. Tokens die with the match;
-  audit logs expire. **The store listings change**: "never touches the
+  256 MB machine pinned to exactly one instance (`fly.toml` explains why),
+  as the `openrackem-rooms` app with a 1 GB volume for the snapshot; the v1
+  `openrackem-server` app stays up for old clients until it is retired.
+  `/status` (public / private / dormant / playing / paused rooms, clients,
+  uptime) doubles as the health check.
+- No accounts and no persistent identity beyond member keys. Player names
+  and room membership are stored server-side for private rooms (up to 30
+  days after the last match); audit logs expire. **The store listings change**: "never touches the
   network" and the Play data-safety answers must be rewritten when
   multiplayer ships (network yes; personal data still none). PRIVACY.md gets
   a section saying exactly what a match transmits and how long the audit log
@@ -191,6 +205,12 @@ phase, plus the seed/rng zeroing pinned. Nothing else in the engine changes.
   browser tabs play each other.
 
 ## 10. Milestones
+
+Status 2026-10-26: **protocol v2 (rooms) is implemented and tested** —
+public and private rooms, ready-up, Partners teams, leave-and-return,
+snapshots — on every client. `make net-multi` plays every room flow (2/3/4
+public, private rematch, Partners swap, step-away, daemon restart) against
+the real daemon and gates the deploy.
 
 Status 2026-08-26: **N0, N1, and N2 are implemented and tested**. The daemon
 (`make server`, `Dockerfile.server`, `fly.toml`) and the desktop online client

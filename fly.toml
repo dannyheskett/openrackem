@@ -1,34 +1,51 @@
-# openrackem multiplayer daemon — a dedicated fly.io app. It is auto-deployed by
-# the `deploy-server` job in .github/workflows/release.yml on every release (a
-# loopback 2/3/4-player match gates the deploy). `fly deploy --ha=false` from the
-# repo root remains the manual fallback. The game's store builds are unrelated.
+# openrackem multiplayer daemon (protocol v2: public and private rooms) — a
+# dedicated fly.io app. It is auto-deployed by the `deploy-server` job in
+# .github/workflows/release.yml on every release (a loopback 2/3/4-player match
+# gates the deploy). `fly deploy --ha=false` from the repo root remains the
+# manual fallback. The game's store builds are unrelated.
+#
+# The v1 daemon (Quick Match) still runs as the separate `openrackem-server`
+# app for clients that haven't updated. CI no longer deploys it; retire it by
+# hand once store adoption of v2 is high.
 #
 # TLS terminates at Fly's edge proxy; the daemon speaks plain WebSocket on the
 # internal port and trusts the Fly-Client-IP header for rate limiting.
 #
-# Game state lives in ONE machine's memory (fixed pools: 1024 rooms, 2048
-# connections, a few tens of MB total), so this app must never scale out: a
-# second machine would split the room table (create-on-A can't be
-# joined-on-B; the quick queue would fragment). A deploy replaces the machine
-# and does end live tables — ship server updates in quiet hours; clients just
-# start new games.
+# Game state lives in ONE machine's memory (fixed pools: 4096 rooms, 2048
+# connections, ~100 MB total), so this app must never scale out: a second
+# machine would split the room table (a private room created on A can't be
+# joined on B, and each would hold half the room list).
+#
+# Durability: the daemon snapshots private rooms and every live match to the
+# volume below (OR_DATA_DIR) every few seconds while anything changed and once
+# more on shutdown, and reloads it at boot. A deploy or restart therefore no
+# longer ends games: players reconnect to their seats with their member keys.
+# The volume also pins the app to one machine.
 #
 # The machine SUSPENDS when idle and wakes on the next connection. Fly's proxy
 # suspends it only when no connection is open, and a WebSocket stays open for
-# a whole game, so a live table keeps it awake. Suspend (not stop) snapshots
-# the machine's memory, so the room table survives a suspend and a seat token
-# still rejoins after it. Never use auto_stop_machines = "stop": a stop is a
-# cold boot and ends every live game.
+# a whole game, so a live table keeps it awake. Suspend snapshots the
+# machine's memory, so even unsaved state survives it; keep "suspend" rather
+# than "stop", which is a cold boot that leans on the volume snapshot.
 #
-# DEPLOY WITH:  fly deploy --ha=false
+# ONE-TIME SETUP:  fly apps create openrackem-rooms
+#                  fly volumes create rooms_data --size 1 -r ewr -a openrackem-rooms
+# DEPLOY WITH:     fly deploy --ha=false
 # Plain `fly deploy` provisions a SECOND machine for zero-downtime HA, which
 # breaks the single-machine invariant above. --ha=false keeps it at one; if a
 # second ever appears, `fly scale count 1`.
-app = "openrackem-server"
+app = "openrackem-rooms"
 primary_region = "ewr"
 
 [build]
   dockerfile = "Dockerfile.server"
+
+[env]
+  OR_DATA_DIR = "/data"
+
+[mounts]
+  source = "rooms_data"
+  destination = "/data"
 
 [http_service]
   internal_port = 8080
