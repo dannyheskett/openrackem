@@ -60,7 +60,7 @@
 #define NET_IN_CAP   16384
 #define NET_OUT_CAP  16384
 #define NET_MSGQ     32
-#define NET_MSG_CAP  2048
+#define NET_MSG_CAP  8192   // a full room list fits (server MSG_BUF)
 
 // Transport shim return sentinels (distinct from a byte count >= 0).
 #define T_AGAIN (-2)   // would block; retry on the next poll

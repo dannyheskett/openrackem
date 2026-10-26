@@ -102,17 +102,38 @@ android-play` builds the Play `.aab`), `make ios` / `make ios-sim` (hand
 assembled `.ipa`, no Xcode project). CI builds all of these on every PR; see
 `.github/workflows/ci.yml` for the exact toolchain setup each platform needs.
 
-## Multiplayer server (v2, in progress)
+## Playing online
+
+**Play Online** needs a player name (it asks for one first). It opens a room
+list:
+
+- **Public rooms** are listed by who's in them (no code). Pick one to step
+  into its waiting room; Leave puts you straight back on the list. Join Best
+  Room picks the one closest to starting; the list can be filtered by Play To.
+- **Private rooms** are unlisted and joined by a 4-character code, a Share
+  link, or the saved room at the top of the list. They last 30 days after
+  their last game, so a group keeps the same code.
+- **Waiting room:** everyone's name with a ready dot (filled = ready). When
+  everyone present (2–4 players) is ready, the game starts. Partners needs 4
+  in two teams of two; players pick teams, and a swap needs the other
+  player's OK. After a match everyone returns to the same waiting room.
+- **Leaving mid-game** keeps your seat: an AI stands in (shown with an "AI"
+  tag) and **Return to Game** brings you back. When it's an absent player's
+  turn the table waits 30 s, and anyone can tap **Let AI play**. Forfeit (from
+  the in-game menu) gives the seat up.
+
+## Multiplayer server
 
 `make server` builds `orserverd`, the authoritative multiplayer daemon
-(Linux): rooms with join codes, a public quick-match queue with AI backfill,
-anonymous seat tokens with reconnect, turn clocks with AI takeover, and
-per-seat redacted state over WebSocket. Single-threaded with fixed pools —
-one tiny fly.io machine holds a thousand concurrent tables (`fly deploy`
-with the included `fly.toml` / `Dockerfile.server`). The desktop app has a
-**Play Online** menu (Quick Match, Create Table, Join by Code) that speaks to
-it; point it at a daemon with `OPENRACKEM_SERVER` / `OPENRACKEM_PORT`
-(default `127.0.0.1:8080`). See `docs/PLAN-MULTIPLAYER.md`.
+(Linux): public and private rooms, waiting rooms with ready-up, a live room
+list, member keys with reconnect, turn clocks and the leave policy, and
+per-seat redacted state over WebSocket. Single-threaded with fixed pools on
+one tiny fly.io machine (`fly.toml` / `Dockerfile.server`). With
+`OR_DATA_DIR` set it snapshots private rooms and live matches to disk, so a
+restart or deploy doesn't end games. Point a client at a local daemon with
+`OPENRACKEM_SERVER` / `OPENRACKEM_PORT` (default
+`openrackem-rooms.fly.dev:443`). `make net-multi` plays every room flow over
+loopback against the real daemon. See `docs/PLAN-MULTIPLAYER.md`.
 
 ## Architecture notes
 

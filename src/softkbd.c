@@ -76,6 +76,10 @@ Java_com_danheskett_openrackem_OpenrackemActivity_nativeKbdEvent(JNIEnv* env, jo
     softkbd_push((int)ev);
 }
 
+// Shared with share.c, which calls back into the same Activity.
+JavaVM* or_android_vm(void) { return s_vm; }
+jobject or_android_activity(void) { return s_activity; }
+
 static void platform_show(bool visible) {
     if (!s_vm || !s_activity) return;
     JNIEnv* env = NULL;

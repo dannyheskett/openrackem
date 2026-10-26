@@ -2,6 +2,7 @@ package com.danheskett.openrackem;
 
 import android.app.NativeActivity;
 import android.content.Context;
+import android.content.Intent;
 import android.graphics.Rect;
 import android.os.Build;
 import android.os.Bundle;
@@ -109,6 +110,21 @@ public class OpenrackemActivity extends NativeActivity {
                 imm.hideSoftInputFromWindow(kbdView.getWindowToken(), 0);
                 kbdView.clearFocus();
                 goImmersive(); // the keyboard can bring the system bars back
+            }
+        });
+    }
+
+    // Called from the game thread (src/share.c): the system share sheet with a
+    // private room's invite line.
+    public void shareText(final String text) {
+        runOnUiThread(() -> {
+            try {
+                Intent send = new Intent(Intent.ACTION_SEND);
+                send.setType("text/plain");
+                send.putExtra(Intent.EXTRA_TEXT, text);
+                startActivity(Intent.createChooser(send, null));
+            } catch (Throwable t) {
+                // No share target: nothing to do (the code is on screen).
             }
         });
     }

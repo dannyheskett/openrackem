@@ -72,6 +72,25 @@ void table_hit_set(int id, Rectangle r);   // id: 0..9 slots, HIT_STOCK, HIT_DIS
 void hit_capture_enable(bool on);
 void hit_offset_set(float ox, float oy);
 
+// Hit capture state for screens that keep their own target lists (the online
+// screens): whether this pass records targets, and a rectangle drawn in the
+// view mapped into window pixels.
+bool      hit_capture_active(void);
+Rectangle hit_window_rect(Rectangle r);
+
+// The online overlay last set by render_set_online_hud (on = false offline).
+const OnlineHud* online_hud(void);
+
+// The portrait view, for the online screens (online_ui.c): present a scene
+// in the same column the table uses, with the title bar and margins.
+void portrait_present(void (*draw)(void*), void* ctx);
+int  portrait_view_w(void);
+int  portrait_view_h(void);
+int  portrait_top_bar_h(void);
+int  portrait_margin(void);
+bool portrait_framed(void);
+void portrait_title_bar(void);
+
 // Rounded rectangle with the corner radius in pixels (clamped to half the
 // shorter side), over gfx_rect_rounded's roundness fraction.
 void rect_rounded_px(int x, int y, int w, int h, int radius, Color color);

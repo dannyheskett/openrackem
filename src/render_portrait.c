@@ -147,6 +147,32 @@ static void draw_title_bar(void) {
     }
     // else: wide notch — leave the bar bare.
 }
+// --- Online overlay helpers ----------------------------------------------------
+// "0:41" from a millisecond countdown, rounded up so 0:00 means it is over.
+static void fmt_clock(char* out, size_t n, int ms) {
+    int secs = (ms + 999) / 1000;
+    if (secs < 0) secs = 0;
+    snprintf(out, n, "%d:%02d", secs / 60, secs % 60);
+}
+
+// The round screens' continue line, with the auto-advance countdown online.
+static const char* continue_text(char* buf, size_t n) {
+    const char* base = framed() ? "CLICK OR PRESS ENTER" : "TAP TO CONTINUE";
+    const OnlineHud* hud = online_hud();
+    if (!hud->on || hud->deadline_ms <= 0) return base;
+    snprintf(buf, n, "%s  -  NEXT IN %d", base, (hud->deadline_ms + 999) / 1000);
+    return buf;
+}
+
+// Exported for the online screens (render_internal.h).
+void portrait_present(void (*draw)(void*), void* ctx) { present_view(draw, ctx); }
+int  portrait_view_w(void)    { return view_w(); }
+int  portrait_view_h(void)    { return view_h(); }
+int  portrait_top_bar_h(void) { return top_bar_h(view_h()); }
+int  portrait_margin(void)    { return outer_margin(); }
+bool portrait_framed(void)    { return framed(); }
+void portrait_title_bar(void) { draw_title_bar(); }
+
 // --- Shared portrait table layout -------------------------------------------
 // Everything is derived from the live screen size each frame, so rotation and
 // resize (web) re-fit automatically.
@@ -384,13 +410,27 @@ static void draw_table_portrait(const Game* game, const TableUi* ui) {
         }
 
         // Names are player-chosen online, so shrink one that would run into
-        // the dots rather than letting it overlap them.
+        // the dots rather than letting it overlap them. Online, a seat whose
+        // player is away (an AI standing in, or the table waiting for them)
+        // reads dimmed with an "AI" pill, so everyone can see who is missing.
         const char* nm = seat_name(game, s);
-        int room = L.side_w - score_w - dots_w - L.opp_fs;
+        const OnlineHud* hud = online_hud();
+        bool away = hud->on && !me && hud->away[s];
+        int pill_fs = L.opp_fs * 2 / 3;
+        int pill_w = away ? gfx_measure_text("AI", pill_fs) + pill_fs : 0;
+        int room = L.side_w - score_w - dots_w - L.opp_fs - (away ? pill_w + pill_fs / 2 : 0);
         int nfs = L.opp_fs;
         while (nfs > 8 && gfx_measure_text(nm, nfs) > room) nfs -= 1;
-        gfx_text(nm, L.side_x, by + (L.opp_row - nfs) / 2, nfs,
-                 active ? TURN_INK : WHITE);
+        Color name_c = active ? TURN_INK : away ? SLOT_LABEL : WHITE;
+        gfx_text(nm, L.side_x, by + (L.opp_row - nfs) / 2, nfs, name_c);
+        if (away) {
+            int px = L.side_x + gfx_measure_text(nm, nfs) + pill_fs / 2;
+            int ph = pill_fs + pill_fs / 2;
+            int py = by + (L.opp_row - ph) / 2;
+            rect_rounded_px(px, py, pill_w, ph, ph / 2, active ? TURN_INK : SLOT_LABEL);
+            gfx_text("AI", px + pill_fs / 2, py + (ph - pill_fs) / 2, pill_fs,
+                     active ? ACCENT : TABLE_BG);
+        }
     }
 
     // --- Side column: score line and the instruction -----------------------
@@ -412,6 +452,18 @@ static void draw_table_portrait(const Game* game, const TableUi* ui) {
         }
     } else {
         turn_msg = turn_owner_text(game, buf, sizeof buf);
+    }
+    // Online, the turn clock rides on the turn line.
+    const OnlineHud* hud = online_hud();
+    char clock[12] = "";
+    if (hud->on && hud->deadline_ms > 0 && hud->wait_seat < 0 &&
+        (game->phase == PHASE_DRAW || game->phase == PHASE_PLACE)) {
+        fmt_clock(clock, sizeof clock, hud->deadline_ms);
+    }
+    char owner_line[64];
+    if (!human_turn && clock[0] && game->phase != PHASE_DEAL) {
+        snprintf(owner_line, sizeof owner_line, "%s %s", turn_msg, clock);
+        turn_msg = owner_line;
     }
 
     // In 2-player games an ascending rack also needs a run of 3 consecutive
@@ -436,9 +488,11 @@ static void draw_table_portrait(const Game* game, const TableUi* ui) {
     // instruction alone ("TAP A PILE TO DRAW") left it to be inferred.
     int iy = L.status_y;
     if (human_turn) {
+        char heading[24];
+        snprintf(heading, sizeof heading, clock[0] ? "YOUR TURN %s" : "YOUR TURN", clock);
         int hfs = L.status_fs * 6 / 5;
-        while (hfs > 9 && gfx_measure_text("YOUR TURN", hfs) > L.side_w) hfs -= 1;
-        text_centered("YOUR TURN", L.side_x + L.side_w / 2, iy, hfs, ACCENT);
+        while (hfs > 9 && gfx_measure_text(heading, hfs) > L.side_w) hfs -= 1;
+        text_centered(heading, L.side_x + L.side_w / 2, iy, hfs, ACCENT);
         iy += hfs + L.status_lh / 2;
     }
     char lines[WRAP_MAX_LINES][WRAP_MAX_CHARS];
@@ -447,6 +501,15 @@ static void draw_table_portrait(const Game* game, const TableUi* ui) {
         text_centered(lines[i], L.side_x + L.side_w / 2,
                       iy + i * L.status_lh, L.status_fs,
                       human_turn ? WHITE : SLOT_LABEL);
+    }
+    if (hud->on && hud->back[0]) {
+        char back[40];
+        snprintf(back, sizeof back, "%s IS BACK", hud->back);
+        int bfs = L.stats_fs;
+        while (bfs > 8 && gfx_measure_text(back, bfs) > L.side_w) bfs -= 1;
+        text_centered(back, L.side_x + L.side_w / 2,
+                      iy + nlines * L.status_lh + L.status_lh / 4, bfs, ACCENT);
+        keys = NULL;
     }
     if (keys) {
         // The keyboard line is a nicety: in a small window it gives way rather
@@ -587,7 +650,7 @@ static void draw_round_scoring_portrait(const Game* game) {
         draw_mini_rack(m, y + fs + 4, cw, ch, &game->players[s].rack, true);
         y += block_h;
     }
-    text_centered(framed() ? "CLICK OR PRESS ENTER" : "TAP TO CONTINUE", w / 2, h - m - fs, fs, GRAY);
+    { char cb[64]; text_centered(continue_text(cb, sizeof cb), w / 2, h - m - fs, fs, GRAY); }
 }
 
 static void draw_standings_portrait(const Game* game) {
@@ -636,7 +699,7 @@ static void draw_standings_portrait(const Game* game) {
         }
     }
     int fs2 = clampi(h / 45, 9, 48);
-    text_centered(framed() ? "CLICK OR PRESS ENTER" : "TAP TO CONTINUE", w / 2, h - m - fs2, fs2, GRAY);
+    { char cb[64]; text_centered(continue_text(cb, sizeof cb), w / 2, h - m - fs2, fs2, GRAY); }
 }
 
 // Match over. The verdict is the hero: previously "MATCH OVER" was the largest
@@ -748,6 +811,43 @@ static void draw_match_over_portrait(const Game* game) {
     text_centered(framed() ? "CLICK OR PRESS ENTER" : "TAP TO CONTINUE", w / 2, h - m - fs2, fs2, GRAY);
 }
 
+// Online: the table is waiting out an absent player's turn. A banner across
+// the middle says who and for how long, with a Let AI play button for anyone
+// present (HIT_LETAI).
+static void draw_online_wait(const Game* game) {
+    const OnlineHud* hud = online_hud();
+    if (!hud->on || hud->wait_seat < 0) return;
+    if (game->phase != PHASE_DRAW && game->phase != PHASE_PLACE) return;
+    int w = view_w(), h = view_h();
+    int m = outer_margin();
+    int pw = w - 2 * m;
+    int fs = clampi(h / 30, 11, 72);
+    int fs2 = clampi(h / 44, 9, 48);
+    int btn_h = clampi(h / 14, 26, 160);
+    int ph = m + fs + m / 2 + fs2 + m + btn_h + m;
+    int px = m, py = (h - ph) / 2;
+    gfx_rect(-s_view_x, 0, s_full_w, h, (Color){ 0, 0, 0, 120 });   // the whole window
+    rect_rounded_px(px, py, pw, ph, m, (Color){ 24, 64, 44, 245 });
+    char title[48], sub[48];
+    snprintf(title, sizeof title, "WAITING FOR %s", seat_name(game, hud->wait_seat));
+    int tfs = fs;
+    while (tfs > 9 && gfx_measure_text(title, tfs) > pw - 2 * m) tfs--;
+    text_centered(title, w / 2, py + m, tfs, ACCENT);
+    if (hud->wait_timer) {
+        char clock[12];
+        fmt_clock(clock, sizeof clock, hud->wait_ms);
+        snprintf(sub, sizeof sub, "THE AI TAKES OVER IN %s", clock);
+    } else {
+        snprintf(sub, sizeof sub, "UNTIL THEY COME BACK");
+    }
+    text_centered(sub, w / 2, py + m + fs + m / 2, fs2, WHITE);
+    int bw = pw * 3 / 5, bx = w / 2 - bw / 2, bth = py + ph - m - btn_h;
+    rect_rounded_px(bx, bth, bw, btn_h, btn_h / 3, ACCENT);
+    int bfs = clampi(btn_h * 2 / 5, 9, 64);
+    text_centered("LET AI PLAY", w / 2, bth + (btn_h - bfs) / 2, bfs, TURN_INK);
+    table_hit_set(HIT_LETAI, (Rectangle){ (float)bx, (float)bth, (float)bw, (float)btn_h });
+}
+
 static void draw_game_portrait(const Game* game, const TableUi* ui) {
     gfx_clear(TABLE_BG);
     draw_title_bar();
@@ -760,6 +860,7 @@ static void draw_game_portrait(const Game* game, const TableUi* ui) {
         draw_match_over_portrait(game);
     } else {
         draw_table_portrait(game, ui);
+        draw_online_wait(game);
     }
 }
 

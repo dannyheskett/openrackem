@@ -1,6 +1,7 @@
-// Unit tests for the online client's state reconstruction (netgame.c): a
-// server `state` message must rebuild the exact redacted Game the renderers
-// draw. Hermetic — the net backend is faked here, so no sockets are opened;
+// Unit tests for the online client's message parsing (netgame.c): a server
+// `state` message must rebuild the exact redacted Game the renderers draw,
+// and `lobby` / `rooms` must become exactly the waiting-room and room-list
+// data the screens draw — with every hostile index rejected or clamped. Hermetic — the net backend is faked here, so no sockets are opened;
 // the socket path is exercised separately by the loopback e2e (make net-e2e).
 //
 // Built and run by `make test`. A non-zero exit means a failure.
@@ -43,7 +44,7 @@ static void emit(char* out, size_t cap, const Game* g, int seat,
     game_redact_for(&r, g, seat);
     JW w; jw_init(&w, out, cap);
     int n = r.rules.player_count;
-    jw_f(&w, "{\"t\":\"state\",\"v\":1,\"seat\":%d,\"players\":%d,\"phase\":%d,"
+    jw_f(&w, "{\"t\":\"state\",\"v\":2,\"seat\":%d,\"players\":%d,\"phase\":%d,"
              "\"turn\":%d,\"dealer\":%d,\"round\":%d,\"target\":%d,\"bonus\":%d,"
              "\"partners\":%d,\"stock\":%d,", seat, n, r.phase, r.turn, r.dealer,
         r.round_no, r.rules.target_score, r.rules.bonus_scoring?1:0,
@@ -66,14 +67,17 @@ static void emit(char* out, size_t cap, const Game* g, int seat,
     for(int p=0;p<n;p++) jw_f(&w,"%s%d",p?",":"",r.round_points[p]);
     jw_f(&w,"],\"last_taken\":[");
     for(int p=0;p<n;p++) jw_f(&w,"%s%d",p?",":"",r.last_taken[p]);
-    jw_f(&w,"],\"ai\":[");
-    for(int p=0;p<n;p++) jw_f(&w,"%s%d",p?",":"",0);
+    jw_f(&w,"],\"ctl\":[");
+    for(int p=0;p<n;p++) jw_f(&w,"%s%d",p?",":"",p==n-1?1:0);   // last seat away
+    jw_f(&w,"],\"handles\":[");
+    for(int p=0;p<n;p++) jw_f(&w,"%s\"P%d\"",p?",":"",p);
     jw_f(&w,"],\"winner\":%d,\"match_winner\":%d,\"recycles\":%d,\"events\":%u,",
         r.round_winner, r.match_winner, r.recycles, r.events);
     if (last_seat>=0)
         jw_f(&w,"\"last\":{\"seat\":%d,\"a\":%d,\"slot\":%d,\"card\":%d},",
              last_seat,last_a,last_slot,last_card);
-    jw_f(&w,"\"deadline_ms\":%d}", 30000);
+    jw_f(&w,"\"wait_seat\":%d,\"wait_ms\":%d,\"wait_timer\":1,\"deadline_ms\":%d}",
+         n-1, 12000, 30000);
 }
 
 static void skip_deal(Game* g){ for(int i=0;i<4096&&g->phase==PHASE_DEAL;i++) game_update(g); }
@@ -188,29 +192,29 @@ static void test_parse_rejects_junk(void) {
     NetGame ng;
     memset(&ng, 0, sizeof ng);
     // Wrong version, missing players, bad seat: all rejected, no crash.
-    CHECK(!netgame_parse_state(&ng, "{\"t\":\"state\",\"v\":2}", 18));
-    CHECK(!netgame_parse_state(&ng, "{\"t\":\"state\",\"v\":1,\"players\":9,\"seat\":0}", 40));
-    CHECK(!netgame_parse_state(&ng, "{\"t\":\"state\",\"v\":1,\"players\":4,\"seat\":9}", 40));
+    CHECK(!netgame_parse_state(&ng, "{\"t\":\"state\",\"v\":1,\"players\":4,\"seat\":0,\"phase\":1}", 49));
+    CHECK(!netgame_parse_state(&ng, "{\"t\":\"state\",\"v\":2,\"players\":9,\"seat\":0}", 40));
+    CHECK(!netgame_parse_state(&ng, "{\"t\":\"state\",\"v\":2,\"players\":4,\"seat\":9}", 40));
     // Hostile seat indices must be rejected, not written into the game (a
     // turn/dealer/winner past MAX_PLAYERS would be an OOB write in seat_name).
     CHECK(!netgame_parse_state(&ng,
-        "{\"t\":\"state\",\"v\":1,\"players\":4,\"seat\":0,\"phase\":1,\"turn\":200}", 62));
+        "{\"t\":\"state\",\"v\":2,\"players\":4,\"seat\":0,\"phase\":1,\"turn\":200}", 62));
     CHECK(!netgame_parse_state(&ng,
-        "{\"t\":\"state\",\"v\":1,\"players\":4,\"seat\":0,\"phase\":1,\"turn\":0,\"dealer\":99}", 71));
+        "{\"t\":\"state\",\"v\":2,\"players\":4,\"seat\":0,\"phase\":1,\"turn\":0,\"dealer\":99}", 71));
     CHECK(!netgame_parse_state(&ng,
-        "{\"t\":\"state\",\"v\":1,\"players\":4,\"seat\":0,\"phase\":3,\"turn\":0,\"winner\":200}", 72));
+        "{\"t\":\"state\",\"v\":2,\"players\":4,\"seat\":0,\"phase\":3,\"turn\":0,\"winner\":200}", 72));
     CHECK(!netgame_parse_state(&ng,
-        "{\"t\":\"state\",\"v\":1,\"players\":4,\"seat\":0,\"phase\":9,\"turn\":0}", 58));
+        "{\"t\":\"state\",\"v\":2,\"players\":4,\"seat\":0,\"phase\":9,\"turn\":0}", 58));
     // ...but NO_WINNER (255) for the winners is legal.
     CHECK(netgame_parse_state(&ng,
-        "{\"t\":\"state\",\"v\":1,\"players\":4,\"seat\":0,\"phase\":1,\"turn\":0,\"winner\":255,"
+        "{\"t\":\"state\",\"v\":2,\"players\":4,\"seat\":0,\"phase\":1,\"turn\":0,\"winner\":255,"
         "\"match_winner\":255}", 90));
 
     // A reveal 'racks' with a short subarray must not leak stack: the missing
     // slots read back as 0, not garbage.
     memset(&ng, 0xAB, sizeof ng);   // poison, so any uncopied slot shows
     const char* shortrack =
-        "{\"t\":\"state\",\"v\":1,\"players\":2,\"seat\":0,\"phase\":3,\"turn\":0,"
+        "{\"t\":\"state\",\"v\":2,\"players\":2,\"seat\":0,\"phase\":3,\"turn\":0,"
         "\"racks\":[[5,6,7],[1,2,3,4,5,6,7,8,9,10]]}";
     CHECK(netgame_parse_state(&ng, shortrack, strlen(shortrack)));
     CHECK(ng.game.players[0].rack.slots[0] == 5);
@@ -227,13 +231,121 @@ static void test_parse_rejects_junk(void) {
     }
 }
 
+
+static void test_parse_v2_fields(void) {
+    Game g; make_game(&g);
+    char buf[2048];
+    NetGame ng;
+    emit(buf, sizeof buf, &g, 0, -1, 0, 0, 0);
+    memset(&ng, 0, sizeof ng);
+    CHECK(netgame_parse_state(&ng, buf, strlen(buf)));
+    // The away flags, the names, and the absent-player wait.
+    CHECK(ng.ctl[3] == 1 && ng.ctl[0] == 0);
+    CHECK(ng.game.players[3].is_ai && !ng.game.players[0].is_ai);
+    CHECK(strcmp(ng.handles[2], "P2") == 0);
+    CHECK(ng.wait_seat == 3 && ng.wait_ms == 12000 && ng.wait_timer);
+    CHECK(ng.deadline_ms == 30000);
+    // The countdowns run down locally between messages, never below zero.
+    netgame_elapse(&ng, 2000);
+    CHECK(ng.wait_ms == 10000 && ng.deadline_ms == 28000);
+    netgame_elapse(&ng, 99999);
+    CHECK(ng.wait_ms == 0 && ng.deadline_ms == 0);
+
+    // A hostile wait seat is ignored, not trusted.
+    const char* bad =
+        "{\"t\":\"state\",\"v\":2,\"players\":2,\"seat\":0,\"phase\":1,\"turn\":0,"
+        "\"wait_seat\":77,\"ctl\":[1,1,1,1,1,1,1,1],\"handles\":[\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"]}";
+    CHECK(netgame_parse_state(&ng, bad, strlen(bad)));
+    CHECK(ng.wait_seat == -1);
+    CHECK(strlen(ng.handles[0]) < NG_NAME);            // long name truncated
+}
+
+static void test_parse_lobby(void) {
+    NetGame ng;
+    memset(&ng, 0, sizeof ng);
+    const char* lob =
+        "{\"t\":\"lobby\",\"v\":2,\"id\":8193,\"code\":\"K7QM\",\"private\":1,\"target\":750,"
+        "\"bonus\":1,\"partners\":1,\"away\":1,\"me\":2,\"names\":[\"Dan\",\"Alex\",\"Priya\",\"\"],"
+        "\"used\":[1,1,1,0],\"ready\":[1,0,1,0],\"team\":[0,1,0,0],\"on\":[1,1,1,0],"
+        "\"count_ms\":-1,\"block\":\"partners4\",\"force\":0,\"swap_from\":1}";
+    CHECK(netgame_parse_lobby(&ng, lob));
+    NgLobby* L = &ng.lobby;
+    CHECK(L->id == 8193 && strcmp(L->code, "K7QM") == 0 && L->priv);
+    CHECK(L->target == 750 && L->bonus && L->partners && L->away_policy == 1);
+    CHECK(L->me == 2);
+    CHECK(strcmp(L->names[1], "Alex") == 0 && L->names[3][0] == '\0');
+    CHECK(L->used[2] && !L->used[3]);
+    CHECK(L->ready[0] && !L->ready[1]);
+    CHECK(L->team[1] == 1);
+    CHECK(L->count_ms == -1 && strcmp(L->block, "partners4") == 0);
+    CHECK(L->swap_from == 1);
+    CHECK(strcmp(ng.code, "K7QM") == 0);
+
+    // Hostile: our index out of range is rejected; a swap from an empty or
+    // out-of-range member is dropped.
+    CHECK(!netgame_parse_lobby(&ng, "{\"t\":\"lobby\",\"v\":2,\"me\":9}"));
+    CHECK(netgame_parse_lobby(&ng,
+        "{\"t\":\"lobby\",\"v\":2,\"me\":0,\"used\":[1,0,0,0],\"swap_from\":3}"));
+    CHECK(ng.lobby.swap_from == -1);
+    CHECK(netgame_parse_lobby(&ng,
+        "{\"t\":\"lobby\",\"v\":2,\"me\":0,\"used\":[1,1,1,1,1,1,1],\"swap_from\":200}"));
+    CHECK(ng.lobby.swap_from == -1);
+}
+
+static void test_parse_rooms(void) {
+    NetGame ng;
+    memset(&ng, 0, sizeof ng);
+    const char* rooms =
+        "{\"t\":\"rooms\",\"total\":143,\"target\":0,\"ids\":[4097,12],\"targets\":[500,250],"
+        "\"bonus\":[0,1],\"partners\":[1,0],\"names\":[[\"Sam\",\"Lee\",\"Kim\"],[\"Jo\"]],"
+        "\"ready\":[[1,1,0],[0]]}";
+    CHECK(netgame_parse_rooms(&ng, rooms));
+    CHECK(ng.room_count == 2 && ng.rooms_total == 143);
+    CHECK(ng.rooms[0].id == 4097 && ng.rooms[0].n == 3 && ng.rooms[0].partners);
+    CHECK(strcmp(ng.rooms[0].names[2], "Kim") == 0);
+    CHECK(ng.rooms[0].ready[0] && ng.rooms[0].ready[1] && !ng.rooms[0].ready[2]);
+    CHECK(ng.rooms[1].id == 12 && ng.rooms[1].n == 1 && ng.rooms[1].target == 250);
+    CHECK(ng.rooms[1].bonus && !ng.rooms[1].partners);
+
+    // Empty list.
+    CHECK(netgame_parse_rooms(&ng, "{\"t\":\"rooms\",\"total\":0,\"ids\":[]}"));
+    CHECK(ng.room_count == 0 && ng.rooms_total == 0);
+
+    // Hostile: more ids than the list holds, more names than seats, ragged
+    // nesting — bounded, no crash.
+    char big[4096];
+    int off = snprintf(big, sizeof big, "{\"t\":\"rooms\",\"total\":1,\"ids\":[");
+    for (int i = 0; i < 60; i++) off += snprintf(big + off, sizeof big - off, "%s%d", i ? "," : "", i);
+    snprintf(big + off, sizeof big - off,
+             "],\"names\":[[\"a\",\"b\",\"c\",\"d\",\"e\",\"f\"],[\"x\"],7,[[[\"],\"ready\":[[1,1,1,1,1,1,1]]}");
+    CHECK(netgame_parse_rooms(&ng, big));
+    CHECK(ng.room_count == NG_LIST_MAX);
+    CHECK(ng.rooms_total == NG_LIST_MAX);              // total never below shown
+    CHECK(ng.rooms[0].n == MAX_PLAYERS);
+
+    // Garbage never crashes either parser.
+    uint32_t lcg = 31337;
+    char b[160];
+    for (int it = 0; it < 3000; it++) {
+        lcg = lcg*1664525u+1013904223u; int len = (int)(lcg % 150u);
+        for (int i = 0; i < len; i++) { lcg = lcg*1664525u+1013904223u; b[i] = (char)(lcg>>16); }
+        b[len] = '\0';
+        netgame_parse_rooms(&ng, b);
+        netgame_parse_lobby(&ng, b);
+    }
+}
+
 int main(void) {
     printf("test_netgame: state reconstruction — mid-round redaction, reveal,\n");
-    printf("              public discard draw, junk rejection\n");
+    printf("              public discard draw, junk rejection, v2 fields,\n");
+    printf("              waiting room, room list\n");
     test_parse_midround();
     test_parse_reveal();
     test_parse_discard_public();
     test_parse_rejects_junk();
+    test_parse_v2_fields();
+    test_parse_lobby();
+    test_parse_rooms();
     if (failures == 0) { printf("OK: all checks passed\n"); return 0; }
     printf("FAILED: %d check(s)\n", failures);
     return 1;

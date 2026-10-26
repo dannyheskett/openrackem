@@ -138,6 +138,13 @@ void render_set_seat_labels(const char labels[][16], int count) {
 }
 void render_clear_seat_labels(void) { s_seat_labels_on = false; }
 
+static OnlineHud s_hud;
+void render_set_online_hud(const OnlineHud* hud) {
+    if (hud) s_hud = *hud;
+    else memset(&s_hud, 0, sizeof s_hud);
+}
+const OnlineHud* online_hud(void) { return &s_hud; }
+
 const char* seat_name(const Game* g, int seat) {
     static char buf[MAX_PLAYERS][8];
     // Defensive clamp: buf is indexed by seat, so an out-of-range value (from
@@ -224,7 +231,7 @@ void draw_center_panel_at(int w, int h, int panel_w, int panel_h, int ts,
 // Table rectangles captured by the last render_frame (rack slots + piles) and
 // menu item rectangles captured by the last render_menu. Written by the active
 // renderer, read by the hit-test entry points below.
-#define TABLE_ZONES 12   // 0..9 slots, HIT_STOCK, HIT_DISCARD
+#define TABLE_ZONES 13   // 0..9 slots, HIT_STOCK, HIT_DISCARD, HIT_LETAI
 static Rectangle s_table_rects[TABLE_ZONES];
 static bool      s_table_valid[TABLE_ZONES];
 
@@ -242,6 +249,9 @@ static Rectangle hit_to_window(Rectangle r) {
     return (Rectangle){ r.x + s_hit_ox, r.y + s_hit_oy, r.width, r.height };
 }
 
+bool hit_capture_active(void) { return s_hits_on; }
+Rectangle hit_window_rect(Rectangle r) { return hit_to_window(r); }
+
 void table_hits_reset(void) {
     if (!s_hits_on) return;
     for (int i = 0; i < TABLE_ZONES; i++) s_table_valid[i] = false;
@@ -254,6 +264,9 @@ void table_hit_set(int id, Rectangle r) {
 }
 
 int render_table_hit_test(Vector2 p) {
+    // The absent-player banner draws over the rack, so its button wins.
+    if (s_table_valid[HIT_LETAI] && CheckCollisionPointRec(p, s_table_rects[HIT_LETAI]))
+        return HIT_LETAI;
     for (int i = 0; i < TABLE_ZONES; i++) {
         if (s_table_valid[i] && CheckCollisionPointRec(p, s_table_rects[i])) return i;
     }
