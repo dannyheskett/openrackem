@@ -11,6 +11,10 @@ extern "C" {
 #endif
 void app_init(void);
 void app_frame(void);
+// App lifecycle (iOS shell -> game): an online match steps away the moment
+// the app resigns active, and comes back (or reconnects) when it returns.
+void app_on_background(void);
+void app_on_foreground(void);
 #ifdef __cplusplus
 }
 #endif

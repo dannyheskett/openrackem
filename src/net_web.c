@@ -18,7 +18,7 @@
 #include <stdio.h>
 
 #define WEB_MSGQ    32
-#define WEB_MSG_CAP 2048
+#define WEB_MSG_CAP 8192   // a full room list fits (server MSG_BUF)
 
 struct NetConn {
     EMSCRIPTEN_WEBSOCKET_T sock;   // small positive handle, <=0 = failed

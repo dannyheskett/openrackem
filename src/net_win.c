@@ -38,7 +38,7 @@
 #define WIN_OUT_CAP  16384
 #define WIN_ENC_CAP  32768
 #define WIN_MSGQ     32
-#define WIN_MSG_CAP  2048
+#define WIN_MSG_CAP  8192   // a full room list fits (server MSG_BUF)
 
 // Transport shim sentinels (distinct from a byte count >= 0).
 #define T_AGAIN (-2)

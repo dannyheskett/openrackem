@@ -28,6 +28,21 @@ void render_pause(const Game* game, const TableUi* ui);
 // falls back to "YOU" / "CPU N").
 void render_set_seat_labels(const char labels[][16], int count);
 void render_clear_seat_labels(void);
+
+// The online overlay on a live table (NULL / on = false offline): which seats
+// are away (an AI standing in, or the table waiting for them), the running
+// turn or round-screen clock, the absent-player wait with its Let AI play
+// button (HIT_LETAI), and a brief "X is back".
+typedef struct {
+    bool    on;
+    uint8_t away[MAX_PLAYERS];
+    int     deadline_ms;   // current turn / round-screen countdown (0 = none)
+    int     wait_seat;     // seat the table is waiting for (-1 = none)
+    int     wait_ms;       // ...remaining, when wait_timer
+    bool    wait_timer;    // false = waiting until they return
+    char    back[16];      // name of a player who just came back ("" = none)
+} OnlineHud;
+void render_set_online_hud(const OnlineHud* hud);
 // The family menu (menu.c). gap_before, if >= 0, inserts a blank line before
 // that item index. Hit-test its rows with menu_hit_test().
 void render_menu(const char* title, const char* const* items, int count,
@@ -49,8 +64,9 @@ enum { PICK_NONE = -1, PICK_NEXT = 100, PICK_PREV = 101, PICK_OK = 102, PICK_CAN
 int render_picker_hit_test(Vector2 p);
 
 // Table zones for touch hit-testing, captured by the last render_frame():
-// 0..9 are rack slots; HIT_STOCK / HIT_DISCARD are the piles.
-enum { HIT_NONE = -1, HIT_STOCK = 10, HIT_DISCARD = 11 };
+// 0..9 are rack slots; HIT_STOCK / HIT_DISCARD are the piles; HIT_LETAI is the
+// online "Let AI play" button on the absent-player banner.
+enum { HIT_NONE = -1, HIT_STOCK = 10, HIT_DISCARD = 11, HIT_LETAI = 12 };
 int render_table_hit_test(Vector2 p);
 
 // Touch device or desktop. Both draw the same layout; a touch device fills the

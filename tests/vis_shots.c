@@ -11,6 +11,7 @@
 
 #include "game.h"
 #include "render.h"
+#include "online_ui.h"
 #include <raylib.h>
 #include <stdio.h>
 #include <string.h>
@@ -37,6 +38,134 @@ static void shoot(const char* mode, const char* scene, const Game* g, const Tabl
     char path[128];
     snprintf(path, sizeof path, "build/shots/%s-%s.png", mode, scene);
     TakeScreenshot(path);
+}
+
+static void snap(const char* mode, const char* scene) {
+    char path[128];
+    snprintf(path, sizeof path, "build/shots/%s-%s.png", mode, scene);
+    TakeScreenshot(path);
+}
+
+static void set_names(char names[][NG_NAME], const char* const* src, int n) {
+    for (int i = 0; i < n; i++) snprintf(names[i], NG_NAME, "%s", src[i]);
+}
+
+// The online screens, from fabricated session data (no network).
+static void shoot_online(const char* mode) {
+    static NetGame ng;
+    memset(&ng, 0, sizeof ng);
+    ng.state = NG_IDLE;
+    ng.have_rooms = true;
+    ng.rooms_total = 37;
+    static const char* const r0[] = {"Sam", "Lee", "Kim"};
+    static const char* const r1[] = {"Jo"};
+    static const char* const r2[] = {"Ana", "Raj"};
+    static const char* const r3[] = {"Priyanka", "Bartholomew"};
+    const char* const* rn[] = {r0, r1, r2, r3};
+    int counts[] = {3, 1, 2, 2};
+    for (int i = 0; i < 4; i++) {
+        ng.rooms[i].id = 100 + i;
+        ng.rooms[i].n = counts[i];
+        set_names(ng.rooms[i].names, rn[i], counts[i]);
+        ng.rooms[i].target = i == 1 ? 250 : 500;
+        ng.rooms[i].bonus = i == 1;
+        ng.rooms[i].partners = i == 2;
+        ng.rooms[i].ready[0] = 1;
+        if (i == 0) ng.rooms[i].ready[1] = 1;
+    }
+    ng.room_count = 4;
+    ng.peek.known = ng.peek.ok = true;
+    snprintf(ng.peek.code, sizeof ng.peek.code, "K7QM");
+    static const char* const pk[] = {"Dan", "Alex"};
+    set_names(ng.peek.names, pk, 2);
+    ng.peek.n = 2;
+    ng.peek.ready[0] = 1;
+
+    OnlineView v = { .ng = &ng, .player = "DAN", .saved_code = "K7QM",
+                     .has_return = false, .sel = 0 };
+    for (int i = 0; i < 3; i++) online_render_list(&v);
+    snap(mode, "online-list");
+    v.has_return = true;
+    v.sel = 5;
+    v.notice = "THAT ROOM IS FULL";
+    for (int i = 0; i < 3; i++) online_render_list(&v);
+    snap(mode, "online-list-return");
+
+    // A public waiting room: three in, one ready.
+    ng.state = NG_LOBBY;
+    NgLobby* L = &ng.lobby;
+    memset(L, 0, sizeof *L);
+    L->target = 500;
+    L->me = 0;
+    static const char* const lm[] = {"Dan", "Alex", "Priya"};
+    set_names(L->names, lm, 3);
+    for (int i = 0; i < 3; i++) { L->used[i] = 1; L->on[i] = 1; }
+    L->ready[1] = 1;
+    L->count_ms = -1;
+    snprintf(L->block, sizeof L->block, "ready");
+    L->swap_from = -1;
+    OnlineView lv = { .ng = &ng, .player = "DAN", .saved_code = "", .sel = 0 };
+    for (int i = 0; i < 3; i++) online_render_lobby(&lv);
+    snap(mode, "online-lobby-public");
+
+    // A private room counting down, owner, Wait policy, one player reconnecting.
+    L->priv = true;
+    snprintf(L->code, sizeof L->code, "K7QM");
+    L->away_policy = 1;
+    L->bonus = true;
+    for (int i = 0; i < 3; i++) L->ready[i] = 1;
+    L->on[2] = 0;
+    L->block[0] = '\0';
+    L->count_ms = 1400;
+    lv.is_owner = true;
+    for (int i = 0; i < 3; i++) online_render_lobby(&lv);
+    snap(mode, "online-lobby-private");
+
+    // Partners: full teams, someone asks us to swap.
+    L->partners = true;
+    L->count_ms = -1;
+    snprintf(L->block, sizeof L->block, "ready");
+    static const char* const pm[] = {"Dan", "Alex", "Priya", "Sam"};
+    set_names(L->names, pm, 4);
+    for (int i = 0; i < 4; i++) { L->used[i] = 1; L->on[i] = 1; L->ready[i] = 0; L->team[i] = i & 1; }
+    for (int i = 0; i < 3; i++) online_render_lobby(&lv);
+    snap(mode, "online-lobby-partners");
+    L->swap_from = 1;
+    for (int i = 0; i < 3; i++) online_render_lobby(&lv);
+    snap(mode, "online-lobby-swap");
+}
+
+// The table with the online overlay: an away seat, the turn clock, and the
+// absent-player banner.
+static void shoot_online_table(const char* mode) {
+    Game* g = make_game(false);
+    while (g->anim.frames > 0) game_update(g);
+    static const char labels[4][16] = {"Dan", "Alex", "Priya", "Sam"};
+    render_set_seat_labels(labels, 4);
+    OnlineHud hud = { .on = true, .deadline_ms = 41000, .wait_seat = -1 };
+    hud.away[2] = 1;
+    snprintf(hud.back, sizeof hud.back, "SAM");
+    render_set_online_hud(&hud);
+    TableUi ui = { .cursor = 4, .standings = false };
+    g->turn = 0;
+    g->phase = PHASE_DRAW;
+    shoot(mode, "online-table", g, &ui);
+    hud.back[0] = '\0';
+    hud.wait_seat = 2;
+    hud.wait_ms = 23000;
+    hud.wait_timer = true;
+    render_set_online_hud(&hud);
+    g->turn = 2;
+    shoot(mode, "online-wait", g, &ui);
+    hud.wait_seat = -1;
+    hud.deadline_ms = 12000;
+    render_set_online_hud(&hud);
+    g->phase = PHASE_ROUND_OVER;
+    g->round_winner = 1;
+    shoot(mode, "online-round-over", g, &ui);
+    render_set_online_hud(NULL);
+    render_clear_seat_labels();
+    game_destroy(g);
 }
 
 // Every screen once, in whichever renderer is currently selected.
@@ -99,6 +228,9 @@ static void shoot_all(const char* mode) {
     char path[128];
     snprintf(path, sizeof path, "build/shots/%s-menu.png", mode);
     TakeScreenshot(path);
+
+    shoot_online(mode);
+    shoot_online_table(mode);
 }
 
 int main(void) {

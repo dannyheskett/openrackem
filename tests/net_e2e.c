@@ -37,9 +37,6 @@ static unsigned pump(NetGame* ng) {
     return ev;
 }
 
-// Drive one client toward completing its own turns; opponents' turns and the
-// deal are the server's job. Returns when the match is over or a step budget
-// is exhausted.
 int main(void) {
     signal(SIGPIPE, SIG_IGN);
 
@@ -57,19 +54,29 @@ int main(void) {
     CHECK(srv > 0);
     sleep_ms(300);   // let it bind/listen
 
-    // Two clients: A creates a 2-player room, B joins by its code.
+    // Two clients: A creates a private room, B joins by its code, both ready.
     NetGame a, b;
     Rules r = rules_default();
-    r.player_count = 2;
     r.target_score = 50;    // shortest match: one player going out decides it
-    netgame_start(&a, "127.0.0.1", port, false, NG_JOIN_CREATE, NULL, &r, "Alice");
+    netgame_start(&a, "127.0.0.1", port, false, "Alice", NULL);
+    netgame_start(&b, "127.0.0.1", port, false, "Bob", NULL);
+    for (int i = 0; i < 2000 && (a.state != NG_IDLE || b.state != NG_IDLE); i++) {
+        pump(&a);
+        pump(&b);
+    }
+    CHECK(a.state == NG_IDLE && b.state == NG_IDLE);
+    netgame_create(&a, true, &r, false);
 
     // Pump A until it has a room code.
     for (int i = 0; i < 2000 && a.code[0] == '\0'; i++) pump(&a);
     CHECK(a.code[0] != '\0');
     printf("  room code: %s\n", a.code);
 
-    netgame_start(&b, "127.0.0.1", port, false, NG_JOIN_CODE, a.code, NULL, "Bob");
+    netgame_join_code(&b, a.code);
+    for (int i = 0; i < 2000 && b.state != NG_LOBBY; i++) { pump(&a); pump(&b); }
+    CHECK(b.state == NG_LOBBY);
+    netgame_ready(&a, true);
+    netgame_ready(&b, true);
 
     // Play. On its own turn each client runs the real AI over its redacted
     // view (its own rack and the public table are all ai_choose needs), so
@@ -109,16 +116,16 @@ int main(void) {
             } else if (ng->state == NG_PLAYING && ng->game.phase == PHASE_ROUND_OVER) {
                 netgame_confirm(ng);
             }
-            if (ng->state == NG_PLAYING && ng->game.phase == PHASE_MATCH_OVER) at_match_over++;
+            if (ng->result_pending && ng->game.phase == PHASE_MATCH_OVER) at_match_over++;
             if (ng->state == NG_ERROR) { printf("  client %d error: %s\n", who, ng->err); CHECK(0); over = true; }
         }
-        // Finish only when BOTH clients have seen the match-over state, so the
-        // final round's confirmations have gone through on both.
+        // Finish only when BOTH clients have seen the match-over state and are
+        // back in the waiting room, so the final confirmations went through.
         if (at_match_over == 2) over = true;
     }
 
     CHECK(over);
-    CHECK(a.state == NG_PLAYING && a.game.phase == PHASE_MATCH_OVER);
+    CHECK(a.state == NG_LOBBY && a.game.phase == PHASE_MATCH_OVER);
     CHECK(b.game.phase == PHASE_MATCH_OVER);
     // Both clients agree on who won (authoritative broadcast).
     CHECK(a.game.match_winner == b.game.match_winner);
