@@ -105,6 +105,9 @@ static void platform_show(bool visible) { plat_ios_set_keyboard(visible); }
 EM_JS(void, js_kbd_set, (int on), {
     if (window.orKbd) window.orKbd.set(!!on);
 });
+EM_JS(int, js_kbd_ok, (), {
+    return window.orKbd ? 1 : 0;
+});
 EM_JS(int, js_kbd_next, (), {
     return window.orKbd ? window.orKbd.next() : 0;
 });
@@ -116,12 +119,31 @@ static void platform_show(bool visible) { (void)visible; }
 
 // --- Public API -------------------------------------------------------------
 bool softkbd_available(void) {
-#if defined(PLATFORM_ANDROID) || defined(PLATFORM_IOS)
+#if defined(PLATFORM_ANDROID)
+    return s_activity != NULL; // nativeKbdRegister ran (it can fail; see the Activity)
+#elif defined(PLATFORM_IOS)
     return true;
 #elif defined(PLATFORM_WEB) && defined(__EMSCRIPTEN__)
-    return render_use_portrait(); // the touch layout; desktop browsers type directly
+    // The touch layout, on a page that has the hidden input; desktop browsers
+    // type directly.
+    return render_use_portrait() && js_kbd_ok();
 #else
     return false;
+#endif
+}
+
+static bool s_hw_key_seen = false;
+
+void softkbd_note_hw_key(void) { s_hw_key_seen = true; }
+
+bool softkbd_keyboard_detected(void) {
+    if (softkbd_available() || s_hw_key_seen) return true;
+#if defined(PLATFORM_ANDROID) || defined(PLATFORM_IOS)
+    return false;
+#elif defined(PLATFORM_WEB)
+    return !render_use_portrait(); // the desktop layout: a fine pointer, so a PC
+#else
+    return true; // desktop native
 #endif
 }
 

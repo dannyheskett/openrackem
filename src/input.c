@@ -102,6 +102,9 @@ static void poll_keyboard(Input* in) {
 
     // Any key (drains one entry from the per-frame key-press queue).
     in->any_pressed = GetKeyPressed() != 0;
+    // Mouse buttons never reach the key queue, so a press here is a real
+    // keyboard: the text-entry picker can drop its letter spinners.
+    if (in->any_pressed) softkbd_note_hw_key();
 }
 #endif // !PLATFORM_ANDROID && !PLATFORM_IOS
 

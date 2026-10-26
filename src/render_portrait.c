@@ -802,7 +802,8 @@ void render_pause_portrait(const Game* g, const TableUi* ui) {
 // The slot picker, sized off the live screen like everything else here. Twelve
 // name slots have to fit a phone's width, so the slots themselves are modest;
 // the spinner bands and the buttons are what get the thumb-sized targets.
-// Where the device has an on-screen keyboard (softkbd.h) it does the typing.
+// Where there is a keyboard, on-screen or physical (softkbd.h), it does the
+// typing; only without one do the spinner bands appear.
 typedef struct {
     const char* title; const char* slots; int cursor;
     const char* alphabet; const char* hint; const char* ok;
@@ -824,10 +825,11 @@ static void draw_picker_cb(void* p) {
     if (slot_w > base / 6) slot_w = base / 6;   // few slots shouldn't sprawl
     int slot_h  = slot_w * 9 / 5;
     int slot_fs = slot_h * 3 / 5;
-    // With the device's keyboard up the letters are typed, so the spinner
-    // bands go and the panel sits at the top, clear of the keyboard.
+    // With any keyboard (the device's own, or a physical one) the letters are
+    // typed, so the spinner bands go. The device's keyboard also covers the
+    // bottom of the screen, so then the panel sits at the top, clear of it.
     bool kbd    = softkbd_available();
-    int band_h  = kbd ? 0 : slot_h * 4 / 5;
+    int band_h  = softkbd_keyboard_detected() ? 0 : slot_h * 4 / 5;
 
     int title_size = clampi(h / 20, 14, 120);
     int hint_fs    = clampi(h / 52, 9, 44);

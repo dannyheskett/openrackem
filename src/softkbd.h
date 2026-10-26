@@ -15,10 +15,22 @@ extern "C" { // ios_main.mm pushes events from Objective-C++
 // frame's Input by input.c, so the screens see them exactly like desktop typing.
 //
 // Desktop builds compile the same API as no-ops: they have a real keyboard.
+// Only where neither keyboard is detected does the picker fall back to its
+// tap-to-cycle letter spinners.
 
-// True where this build can raise a native keyboard (touch platforms, and on
-// the web only in the touch layout).
+// True where this build can raise a native keyboard: Android once the
+// Activity has registered its keyboard view, iOS, and on the web the touch
+// layout when the page provides the hidden input.
 bool softkbd_available(void);
+
+// True where the player has a way to type: the native keyboard above, or a
+// physical one. Desktop builds and the desktop browser layout assume a
+// physical keyboard; elsewhere one counts once a hardware key has been pressed.
+// The text-entry picker shows its letter spinners only when this is false.
+bool softkbd_keyboard_detected(void);
+
+// input.c: a key arrived from a physical keyboard this frame.
+void softkbd_note_hw_key(void);
 
 // Raise or lower the keyboard. Idempotent: called every frame with the wanted
 // state, it only reaches the platform when that state changes.
