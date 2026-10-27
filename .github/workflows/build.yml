@@ -100,18 +100,14 @@ jobs:
     name: linux + windows builds
     needs: prepare
     runs-on: ubuntu-22.04
-    timeout-minutes: 20
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
       - name: Install Linux + mingw deps
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          # Retry and time out stalled package downloads instead of hanging
-          # until the job timeout (a slow mirror once cancelled a CI run).
-          echo 'Acquire::Retries "3"; Acquire::http::Timeout "30"; Acquire::https::Timeout "30";' | sudo tee /etc/apt/apt.conf.d/80-retries >/dev/null
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          ./scripts/apt_install.sh \
             libgl1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev \
             libxcursor-dev libxi-dev libasound2-dev \
             gcc-mingw-w64-x86-64 gcc-mingw-w64-i686 binutils-mingw-w64 \
@@ -151,7 +147,7 @@ jobs:
     name: web (WASM) build
     needs: prepare
     runs-on: ubuntu-22.04
-    timeout-minutes: 20
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
       - name: Set up Emscripten
@@ -159,11 +155,7 @@ jobs:
       # See game-ci.yml: the web target can transitively need the native Linux build.
       - name: Install Linux build deps + zip
         run: |
-          # Retry and time out stalled package downloads instead of hanging
-          # until the job timeout (a slow mirror once cancelled a CI run).
-          echo 'Acquire::Retries "3"; Acquire::http::Timeout "30"; Acquire::https::Timeout "30";' | sudo tee /etc/apt/apt.conf.d/80-retries >/dev/null
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          ./scripts/apt_install.sh \
             libgl1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev \
             libxcursor-dev libxi-dev libasound2-dev \
             zip

@@ -208,6 +208,8 @@ jobs:
     if: ${{ !cancelled() && needs.resolve.result == 'success' && needs.resolve.outputs.do_appstore == 'true' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && (needs.play.result == 'success' || needs.resolve.outputs.do_play == 'false') }}
     runs-on: macos-26
     timeout-minutes: 25
+    outputs:
+      ios_build: ${{ steps.ipa.outputs.ios_build }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -223,7 +225,11 @@ jobs:
           [ -n "$I" ] || missing="$missing ASC_KEY_ID"
           [ -n "$S" ] || missing="$missing ASC_ISSUER_ID"
           [ -z "$missing" ] || { echo "::error::missing secret(s):$missing"; exit 1; }
+      # The .ipa's own CFBundleVersion is the build number App Store Connect
+      # knows it by. It is the release number, except where a repo's build
+      # had to step past a number Apple already held; read it, never assume.
       - name: Download the .ipa from the GitHub Release
+        id: ipa
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.resolve.outputs.tag }}
@@ -239,7 +245,12 @@ jobs:
             || { echo "::error::$ipa is not signed"; exit 1; }
           unzip -p "$ipa" 'Payload/*.app/Info.plist' > "$RUNNER_TEMP/Info.plist"
           v=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$RUNNER_TEMP/Info.plist")
-          [ "$v" = "$BUILD" ] || { echo "::error::$ipa is build $v, not $BUILD"; exit 1; }
+          short=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$RUNNER_TEMP/Info.plist")
+          case "$v" in ''|*[!0-9]*) echo "::error::$ipa has CFBundleVersion '$v'"; exit 1 ;; esac
+          [ "$v" -ge "$BUILD" ] || { echo "::error::$ipa is build $v, below release $BUILD"; exit 1; }
+          [ "$short" = "1.0.$v" ] || { echo "::error::$ipa is version $short, not 1.0.$v"; exit 1; }
+          echo "ios_build=$v" >> "$GITHUB_OUTPUT"
+          echo "release $BUILD -> iOS build $v (version $short)"
       - name: Install the JWT dependency
         run: python3 -m pip install --quiet cryptography
       - name: Check whether App Store Connect already has this build
@@ -248,7 +259,7 @@ jobs:
           ASC_KEY_P8:    ${{ secrets.ASC_KEY_P8 }}
           ASC_KEY_ID:    ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
-          BUILD: ${{ needs.resolve.outputs.build }}
+          BUILD: ${{ steps.ipa.outputs.ios_build }}
         run: |
           state=$(python3 scripts/asc_release.py build-state --build "$BUILD")
           echo "App Store Connect build $BUILD: $state"
@@ -296,7 +307,7 @@ jobs:
           }
           altool_retry --validate-app
           altool_retry --upload-app
-          echo "Uploaded build ${{ needs.resolve.outputs.build }}."
+          echo "Uploaded build ${{ steps.ipa.outputs.ios_build }}."
       - name: Remove the API key
         if: ${{ always() }}
         run: rm -rf ~/.appstoreconnect/private_keys
@@ -313,7 +324,8 @@ jobs:
       ASC_KEY_P8:    ${{ secrets.ASC_KEY_P8 }}
       ASC_KEY_ID:    ${{ secrets.ASC_KEY_ID }}
       ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
-      BUILD: ${{ needs.resolve.outputs.build }}
+      # The iOS build number, as read from the .ipa (see appstore-upload).
+      BUILD: ${{ needs.appstore-upload.outputs.ios_build }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -325,7 +337,7 @@ jobs:
         run: python3 scripts/store_listing.py --check
       - name: TestFlight - wait for processing, attach notes, check internal testers
         env:
-          BUILD_VERSION: ${{ needs.resolve.outputs.build }}
+          BUILD_VERSION: ${{ needs.appstore-upload.outputs.ios_build }}
           NOTES: ${{ needs.resolve.outputs.tag }}
         run: |
           if [ "$DRY" = "true" ]; then
