@@ -135,6 +135,18 @@ restart or deploy doesn't end games. Point a client at a local daemon with
 `openrackem-rooms.fly.dev:443`). `make net-multi` plays every room flow over
 loopback against the real daemon. See `docs/PLAN-MULTIPLAYER.md`.
 
+## Build and release
+
+- Work branches merge into `staging` (squash); `main` takes merges from
+  `staging` only. Every CI job must pass for either merge.
+- **Build:** merging `staging` into `main` runs `build.yml`, which builds every
+  platform, tags `release-N` and publishes the GitHub Release. It never ships
+  to a store.
+- **Release:** `release.yml` is run by hand and ships a chosen `release-N` to
+  Google Play, then the App Store (replacing any version still pending App
+  Review), then the Fly server. Any failure stops it and fails the run.
+  See [docs/STORE-SETUP.md](docs/STORE-SETUP.md).
+
 ## Architecture notes
 
 - `game.c` / `rules.c` / `ai.c` are pure logic: no rendering, no raylib, no

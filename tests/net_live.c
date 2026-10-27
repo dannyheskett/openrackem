@@ -1,5 +1,5 @@
 // Live-server smoke test for a net.h backend: two headless clients connect to
-// the real deployed daemon, create + join a private room and ready up, and
+// the real deployed daemon, create + join a public room and ready up, and
 // confirm the full transport works — the wss/TLS handshake, the
 // protocol, and bidirectional message flow (both clients receive authoritative
 // state). Optionally (OR_LIVE_FULLMATCH=1) plays the whole match with the AI.
@@ -50,17 +50,20 @@ int main(void) {
         if (a.state == NG_ERROR) { printf("FAIL: A error: %s\n", a.err); return 1; }
         if (b.state == NG_ERROR) { printf("FAIL: B error: %s\n", b.err); return 1; }
     }
-    netgame_create(&a, true, &r, false);
+    // A public room, not a private one: the server closes a public match a few
+    // minutes after everyone has gone, whereas a private room would keep this
+    // test's abandoned match for 30 days on every CI run.
+    netgame_create(&a, false, &r, false);
 
-    // A creates the room; wait (bounded) for its code.
-    for (int i = 0; i < 5000 && a.code[0] == '\0'; i++) {
+    // A creates the room; wait (bounded) for it.
+    for (int i = 0; i < 5000 && a.state != NG_LOBBY; i++) {
         netgame_update(&a); ms(3);
         if (a.state == NG_ERROR) { printf("FAIL: A error: %s\n", a.err); return 1; }
     }
-    if (a.code[0] == '\0') { printf("FAIL: no room code (connect failed)\n"); return 1; }
-    printf("  created room %s\n", a.code);
+    if (a.state != NG_LOBBY) { printf("FAIL: no room (connect failed)\n"); return 1; }
+    printf("  created public room %ld\n", a.room_id);
 
-    netgame_join_code(&b, a.code);
+    netgame_join_room(&b, a.room_id);
     for (int i = 0; i < 5000 && b.state != NG_LOBBY; i++) {
         netgame_update(&a); netgame_update(&b); ms(3);
     }

@@ -5,8 +5,11 @@ The mirror of scripts/play_release.py, with the same three verbs, so one
 workflow can drive both stores the same way:
 
     listing   subtitle / description / keywords / promo text + screenshots
-    release   attach an uploaded build to a version and submit it for review
+    release   attach an uploaded build to a version and submit it for review,
+              first withdrawing any earlier version still pending review
     status    the current version, its state, and the builds available
+    build-state       whether build N is in App Store Connect, and its state
+    verify-submitted  fail unless version 1.0.N is in review with build N
 
 What Apple does NOT expose: the App Privacy nutrition label (every endpoint
 404s) and creating the app record. Both are one-time console work.
@@ -33,12 +36,21 @@ Usage:
   asc_release.py status
   asc_release.py listing [--dry-run]
   asc_release.py release --build N [--submit] [--phased] [--dry-run] \
-                         [--whats-new TEXT] [--skip-if-busy]
+                         [--whats-new TEXT]
+  asc_release.py build-state --build N
+  asc_release.py verify-submitted --build N
 
 --whats-new is required by Apple on an update and defaults to a standard line;
-override it when a release warrants real copy. --skip-if-busy exits 0 when a
-version already holds Apple's single submission slot, which is what makes an
-unattended submission safe.
+override it when a release warrants real copy.
+
+Apple allows one version in review at a time. `release` replaces whatever holds
+that slot: an earlier version waiting for or in review is withdrawn (and the run
+says so), then the new build goes onto the freed version record. A version
+Apple is in the middle of publishing is waited for. Anything that cannot be
+replaced fails the run with the version and its state named -- it never skips.
+
+Every API call retries temporary errors (HTTP 429/5xx, network failures) up to
+three times, then fails (scripts/net_retry.py).
 
 `--build N` is the release number: the Makefile stamps CFBundleVersion with it
 and CFBundleShortVersionString with 1.0.N, so the version record is 1.0.N.
@@ -51,7 +63,6 @@ import os
 import plistlib
 import sys
 import time
-import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -60,6 +71,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import net_retry  # noqa: E402
 from store_listing import ListingError, asc_listing  # noqa: E402
 
 BASE = "https://api.appstoreconnect.apple.com"
@@ -72,6 +84,16 @@ BASE = "https://api.appstoreconnect.apple.com"
 # script's explanation rather than the runner killing it.
 ASSET_WAIT_SECONDS = 10 * 60
 ASSET_POLL_SECONDS = 15
+
+# Replacing a pending review: how long to wait for a withdrawn version to become
+# editable, and for a version Apple is mid-way through publishing to go live.
+WITHDRAW_WAIT_SECONDS = 10 * 60
+PUBLISH_WAIT_SECONDS = 30 * 60
+STATE_POLL_SECONDS = 20
+
+# Replaced in the tests so they don't wait.
+sleep = time.sleep
+monotonic = time.monotonic
 
 REPO = Path(__file__).resolve().parent.parent
 LOCALE = "en-US"
@@ -111,13 +133,24 @@ EDITABLE = {
 }
 
 # Apple allows exactly one submission in flight per app. A version in any of
-# these states is holding that slot, so a second submission would be refused.
-# Unattended callers (--skip-if-busy) treat that as "nothing to do" rather than
-# an error: the next release will carry the change anyway.
+# these states is holding that slot, so a second submission would be refused
+# until it is withdrawn (or, if Apple is publishing it, until it goes live).
 IN_FLIGHT = {
     "WAITING_FOR_REVIEW", "IN_REVIEW", "PENDING_APPLE_RELEASE",
     "PENDING_DEVELOPER_RELEASE", "PROCESSING_FOR_APP_STORE", "READY_FOR_REVIEW",
 }
+
+# Versions under review that a release withdraws, and versions already approved
+# that Apple is publishing (these apps publish automatically on approval).
+WITHDRAWABLE = {"WAITING_FOR_REVIEW", "IN_REVIEW", "READY_FOR_REVIEW"}
+PUBLISHING = {"PENDING_APPLE_RELEASE", "PROCESSING_FOR_APP_STORE"}
+
+# What verify-submitted accepts after a submission: in review, or already past it.
+SUBMITTED_OK = {"WAITING_FOR_REVIEW", "IN_REVIEW", "PENDING_APPLE_RELEASE",
+                "PROCESSING_FOR_APP_STORE", "READY_FOR_SALE"}
+
+# Review-submission states that hold a version in Apple's queue.
+OPEN_SUBMISSION = "WAITING_FOR_REVIEW,IN_REVIEW,UNRESOLVED_ISSUES"
 
 
 def token():
@@ -188,14 +221,14 @@ class ASC:
             headers={"Authorization": "Bearer " + token(),
                      "Content-Type": "application/json"})
         try:
-            with urllib.request.urlopen(req) as r:
-                raw = r.read()
+            raw = net_retry.request(req, f"{method} {path}")
             return json.loads(raw) if raw else {}
-        except urllib.error.HTTPError as e:
-            text = e.read().decode()
+        except net_retry.HTTPFailure as e:
             if raise_errors:
-                raise ASCError(e.code, method, path, text) from None
-            sys.exit(f"HTTP {e.code} on {method} {path}\n{text[:1500]}")
+                raise ASCError(e.code, method, path, e.text) from None
+            sys.exit(str(e))
+        except net_retry.NetworkFailure as e:
+            sys.exit(str(e))
 
     def put_bytes(self, op, blob):
         """One upload operation from a reserved asset: raw PUT, Apple's headers."""
@@ -207,9 +240,9 @@ class ASC:
         for h in op.get("requestHeaders", []):
             req.add_header(h["name"], h["value"])
         try:
-            urllib.request.urlopen(req).read()
-        except urllib.error.HTTPError as e:
-            sys.exit(f"HTTP {e.code} uploading asset\n{e.read().decode()[:800]}")
+            net_retry.request(req, "uploading asset")
+        except (net_retry.HTTPFailure, net_retry.NetworkFailure) as e:
+            sys.exit(str(e))
 
     def app_id(self):
         r = self.call("GET", f"/v1/apps?filter[bundleId]={BUNDLE_ID}")
@@ -224,6 +257,15 @@ class ASC:
         for v in r.get("data", []):
             if v["attributes"]["appStoreState"] in EDITABLE:
                 return v
+        return None
+
+    def versions(self, app):
+        return self.call("GET", f"/v1/apps/{app}/appStoreVersions?limit=10").get("data", [])
+
+    def version_state(self, app, version_id):
+        for v in self.versions(app):
+            if v["id"] == version_id:
+                return v["attributes"]["appStoreState"]
         return None
 
     def in_flight_version(self, app):
@@ -264,16 +306,8 @@ def cmd_listing(asc, args):
     app = asc.app_id()
     version = asc.editable_version(app)
     if not version and not asc.dry_run:
-        # There is nothing to write a listing onto. Unattended that is normal --
-        # a version already in review holds Apple's only submission slot, so the
-        # release step ahead of this one skipped too, and this must skip for the
-        # same reason rather than failing the release behind it.
-        if args.skip_if_busy:
-            busy = asc.in_flight_version(app)
-            where = (f"{busy['attributes']['versionString']} is "
-                     f"{busy['attributes']['appStoreState']}") if busy else "nothing is pending"
-            print(f"  no editable version ({where}); skipping the listing")
-            return 0
+        # `release --build N` runs first and leaves an editable version (it
+        # withdraws anything pending), so there is always one to write onto.
         sys.exit("no editable version; run `release --build N` first to create one")
     version_id = version["id"] if version else "<version>"
 
@@ -511,21 +545,90 @@ def ensure_review_info(asc, app, version_id):
     print("  review details: contact copied, notes from LISTING.md")
 
 
+def wait_for_state(asc, app, version_id, wanted, seconds, what):
+    """Poll until the version's state is in `wanted` (or it leaves the version
+    list, which counts when wanted is None). Fails the run on timeout."""
+    deadline = monotonic() + seconds
+    while True:
+        state = asc.version_state(app, version_id)
+        if (wanted is None and state is None) or (wanted is not None and state in wanted):
+            return state
+        if monotonic() >= deadline:
+            sys.exit(f"{what}: still {state} after {seconds // 60} min")
+        print(f"  {what}: {state}; checking again in {STATE_POLL_SECONDS}s", flush=True)
+        sleep(STATE_POLL_SECONDS)
+
+
+def withdraw(asc, app, version):
+    """Take a version out of Apple's review queue so the slot is free, and wait
+    until the version is editable again. Fails the run if Apple refuses."""
+    a = version["attributes"]
+    vs, state = a["versionString"], a["appStoreState"]
+    if state == "READY_FOR_REVIEW":
+        # Attached to a draft submission that was never sent: remove the item.
+        drafts = asc.call("GET", f"/v1/reviewSubmissions?filter[app]={app}"
+                                 "&filter[platform]=IOS&filter[state]=READY_FOR_REVIEW"
+                                 "&include=items")
+        items = [i for i in drafts.get("included", []) if i.get("type") == "reviewSubmissionItems"]
+        if not items:
+            sys.exit(f"{vs} is READY_FOR_REVIEW but no draft submission item holds it; "
+                     f"remove it in App Store Connect, then re-run")
+        for item in items:
+            try:
+                asc.call("DELETE", f"/v1/reviewSubmissionItems/{item['id']}", raise_errors=True)
+            except ASCError as e:
+                sys.exit(f"Apple refused to remove {vs} from its draft submission:\n{e}")
+    else:
+        subs = asc.call("GET", f"/v1/reviewSubmissions?filter[app]={app}"
+                               f"&filter[platform]=IOS&filter[state]={OPEN_SUBMISSION}")
+        open_subs = subs.get("data") or []
+        if not open_subs:
+            sys.exit(f"{vs} is {state} but App Store Connect lists no open review "
+                     f"submission to withdraw; check it in App Store Connect, then re-run")
+        for sub in open_subs:
+            try:
+                asc.call("PATCH", f"/v1/reviewSubmissions/{sub['id']}",
+                         {"data": {"type": "reviewSubmissions", "id": sub["id"],
+                                   "attributes": {"canceled": True}}}, raise_errors=True)
+            except ASCError as e:
+                sys.exit(f"Apple refused to withdraw {vs} ({state}) from review:\n{e}")
+    if asc.dry_run:
+        print(f"  [dry-run] would withdraw {vs} from review (was {state})")
+        return
+    wait_for_state(asc, app, version["id"], EDITABLE, WITHDRAW_WAIT_SECONDS,
+                   f"withdrawing {vs}")
+    print(f"  withdrew {vs} from review (was {state})")
+
+
+def replace_pending(asc, app):
+    """Free Apple's single submission slot for a new release: withdraw a version
+    under review, wait out one Apple is publishing. Anything else fails."""
+    busy = asc.in_flight_version(app)
+    if not busy:
+        print("  no earlier version is pending review")
+        return
+    a = busy["attributes"]
+    vs, state = a["versionString"], a["appStoreState"]
+    if state in WITHDRAWABLE:
+        withdraw(asc, app, busy)
+    elif state in PUBLISHING:
+        print(f"  {vs} is approved and Apple is publishing it ({state}); waiting for it to go live")
+        wait_for_state(asc, app, busy["id"], {"READY_FOR_SALE"}, PUBLISH_WAIT_SECONDS,
+                       f"waiting for {vs} to go live")
+        print(f"  {vs} is live")
+    else:
+        sys.exit(f"{vs} is {state}: approved and held for a manual release, which this "
+                 f"workflow cannot withdraw. Release or reject it in App Store Connect, "
+                 f"then re-run.")
+
+
 def cmd_release(asc, args):
     app = asc.app_id()
     version_string = f"1.0.{args.build}"
 
-    # Apple's submission slot holds one version at a time. An unattended caller
-    # says so and stops at exit 0: the release it was called for still shipped,
-    # and the next one will carry these changes. Failing here would red a release
-    # for something that is not wrong.
-    if args.skip_if_busy:
-        busy = asc.in_flight_version(app)
-        if busy:
-            a = busy["attributes"]
-            print(f"  {a['versionString']} is {a['appStoreState']}; "
-                  f"leaving it alone and skipping {version_string}")
-            return 0
+    # Apple's submission slot holds one version at a time; a release replaces
+    # whatever is in it rather than skipping.
+    replace_pending(asc, app)
 
     version = asc.editable_version(app)
     if version:
@@ -633,6 +736,36 @@ def cmd_release(asc, args):
     return 0
 
 
+def cmd_build_state(asc, args):
+    """Print build N's processing state, or ABSENT. Always exits 0 on a clean
+    read; the workflow decides what each state means."""
+    app = asc.app_id()
+    builds = asc.call("GET", f"/v1/builds?filter[app]={app}&filter[version]={args.build}")
+    data = builds.get("data") or []
+    print(data[0]["attributes"].get("processingState") if data else "ABSENT")
+    return 0
+
+
+def cmd_verify_submitted(asc, args):
+    """Exit non-zero unless version 1.0.N is in review (or past it) with build N
+    attached. The release workflow's read-back after submitting."""
+    app = asc.app_id()
+    want = f"1.0.{args.build}"
+    match = [v for v in asc.versions(app) if v["attributes"]["versionString"] == want]
+    if not match:
+        sys.exit(f"verify: no version {want} in App Store Connect")
+    v = match[0]
+    state = v["attributes"]["appStoreState"]
+    build = asc.call("GET", f"/v1/appStoreVersions/{v['id']}/build").get("data") or {}
+    attached = (build.get("attributes") or {}).get("version")
+    if state not in SUBMITTED_OK:
+        sys.exit(f"verify: {want} is {state}, not in review")
+    if str(attached) != str(args.build):
+        sys.exit(f"verify: {want} has build {attached} attached, not {args.build}")
+    print(f"verified: {want} is {state} with build {attached}")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -641,8 +774,6 @@ def main():
     sub.add_parser("status", help="current version, state and builds")
 
     p_listing = sub.add_parser("listing", help="push listing text + screenshots")
-    p_listing.add_argument("--skip-if-busy", action="store_true",
-                           help="exit 0 when there is no editable version to write onto")
     p_listing.add_argument("--dry-run", action="store_true")
 
     p_rel = sub.add_parser("release", help="attach a build to a version, optionally submit")
@@ -653,14 +784,20 @@ def main():
     p_rel.add_argument("--whats-new", default=DEFAULT_WHATS_NEW,
                        help=f"'What's New' text; Apple requires it on an update "
                             f"(default: {DEFAULT_WHATS_NEW!r})")
-    p_rel.add_argument("--skip-if-busy", action="store_true",
-                       help="exit 0 if a version already holds Apple's submission slot")
     p_rel.add_argument("--dry-run", action="store_true")
+
+    p_bs = sub.add_parser("build-state", help="build N's processing state, or ABSENT")
+    p_bs.add_argument("--build", type=int, required=True)
+
+    p_vs = sub.add_parser("verify-submitted",
+                          help="fail unless 1.0.N is in review with build N attached")
+    p_vs.add_argument("--build", type=int, required=True)
 
     args = ap.parse_args()
     asc = ASC(dry_run=getattr(args, "dry_run", False))
-    return {"status": cmd_status, "listing": cmd_listing, "release": cmd_release}[args.verb](
-        asc, args)
+    return {"status": cmd_status, "listing": cmd_listing, "release": cmd_release,
+            "build-state": cmd_build_state,
+            "verify-submitted": cmd_verify_submitted}[args.verb](asc, args)
 
 
 if __name__ == "__main__":
