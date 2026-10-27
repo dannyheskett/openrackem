@@ -8,6 +8,7 @@ API-writable, so none of it has to be done by hand in the Play Console:
     release   put a versionCode on one or more tracks, at a rollout %, optionally
               uploading the AAB and pushing the listing in the same edit
     status    what is currently on each track
+    verify    fail unless a track holds versionCode N (the release read-back)
 
 What this cannot do is the paperwork: the IARC content rating, the target-
 audience and other App content declarations, category and pricing have no API
@@ -19,15 +20,16 @@ Play's edits are transactional: everything below opens an edit, changes it, and
 commits once. Committing IS the submission -- there is no separate submit call,
 which is why --dry-run stops before the commit rather than before the changes.
 
-Play holds one set of changes in review at a time, and by default a commit
-CANCELS whatever is in review and resubmits everything. That is fine by hand and
-ruinous unattended: a merge every hour would restart review every hour and
-nothing would ever clear it. --skip-if-busy commits with
-changesInReviewBehavior=ERROR_IF_IN_REVIEW instead and exits 0 when Play
-refuses -- the same contract as asc_release.py: the next release carries the
-change. The one-slot rule is also why an unattended release does everything in
-ONE edit: a listing commit followed by a release commit would find the listing
-in review and skip the release. That is what --upload and --with-listing are for.
+Play holds one set of changes in review at a time, and a commit replaces
+whatever is in review with this edit. Releases are a deliberate manual step, so
+that is the intended behaviour. Everything goes in ONE edit (--upload and
+--with-listing), so the bundle, listing and tracks reach review together.
+
+`--upload` skips the upload, and says so, when Play already has that
+versionCode (it can only ever be uploaded once); the tracks are still set.
+
+Every API call retries temporary errors (HTTP 429/5xx, network failures) up to
+three times, then fails (scripts/net_retry.py).
 
 Credentials, first one set wins:
   $PLAY_SERVICE_ACCOUNT_JSON   the service-account JSON *content* (CI)
@@ -38,7 +40,8 @@ Usage:
   play_release.py listing [--dry-run]
   play_release.py release --build N --track TRACK [--track TRACK ...] \\
                           [--upload AAB] [--with-listing] [--rollout 0.2] \\
-                          [--notes TEXT] [--skip-if-busy] [--dry-run]
+                          [--notes TEXT] [--dry-run]
+  play_release.py verify --build N --track TRACK [--status completed|inProgress]
 
 TRACK is internal, alpha (closed testing), beta (open testing) or production.
 `--build N` is the release number: the Makefile sets versionCode from it
@@ -51,7 +54,6 @@ import mimetypes
 import os
 import sys
 import time
-import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -60,6 +62,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import net_retry  # noqa: E402
 from store_listing import ListingError, play_listing  # noqa: E402
 
 PACKAGE = "com.danheskett.openrackem"
@@ -115,8 +118,12 @@ def access_token(sa):
     body = urllib.parse.urlencode({
         "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
         "assertion": assertion}).encode()
-    with urllib.request.urlopen(urllib.request.Request(sa["token_uri"], data=body)) as r:
-        return json.load(r)["access_token"]
+    try:
+        raw = net_retry.request(urllib.request.Request(sa["token_uri"], data=body),
+                                "POST token")
+    except (net_retry.HTTPFailure, net_retry.NetworkFailure) as e:
+        sys.exit(str(e))
+    return json.loads(raw)["access_token"]
 
 
 class Play:
@@ -139,11 +146,10 @@ class Play:
             headers["Content-Type"] = content_type
         req = urllib.request.Request(url, data=data, method=method, headers=headers)
         try:
-            with urllib.request.urlopen(req) as r:
-                body = r.read()
+            body = net_retry.request(req, f"{method} {url.replace(API, '')}")
             return json.loads(body) if body else {}
-        except urllib.error.HTTPError as e:
-            sys.exit(f"HTTP {e.code} on {method} {url}\n{e.read().decode()[:1500]}")
+        except (net_retry.HTTPFailure, net_retry.NetworkFailure) as e:
+            sys.exit(str(e))
 
     # -- edit lifecycle -----------------------------------------------------
     def open_edit(self):
@@ -153,34 +159,13 @@ class Play:
         self.edit = r["id"]
         return self.edit
 
-    def commit(self, skip_if_busy=False):
-        """Commit the edit. False means Play was busy and skip_if_busy let it go."""
+    def commit(self):
+        """Commit the edit; any failure ends the run."""
         if self.dry_run:
             print("  [dry-run] edit NOT committed; nothing changed on Play")
-            return True
-        url = f"{API}/{PACKAGE}/edits/{self.edit}:commit"
-        if skip_if_busy:
-            url += "?changesInReviewBehavior=ERROR_IF_IN_REVIEW"
-        req = urllib.request.Request(url, data=b"", method="POST",
-                                     headers={"Authorization": "Bearer " + self.token})
-        try:
-            urllib.request.urlopen(req).read()
-        except urllib.error.HTTPError as e:
-            body = e.read().decode()[:1500]
-            # Only Play's refusal over a pending review is let go. Anything else
-            # -- including "changes cannot be sent for review automatically",
-            # which needs a human in the console -- must stay a failure, or it
-            # would be skipped silently on every release forever. The edit is
-            # left to expire on its own rather than deleted: a DELETE that fails
-            # here would mask the message that matters.
-            if skip_if_busy and "in review" in body.lower():
-                print("  Play already has changes in review; leaving them alone and "
-                      "skipping this edit")
-                print("  " + body.strip().replace("\n", "\n  ")[:600])
-                return False
-            sys.exit(f"HTTP {e.code} on POST {url}\n{body}")
+            return
+        self.call("POST", f"{API}/{PACKAGE}/edits/{self.edit}:commit", data=b"")
         print(f"  edit {self.edit} committed")
-        return True
 
     def abandon(self):
         if self.edit and not self.dry_run:
@@ -279,7 +264,14 @@ def cmd_release(play, args):
     play.open_edit()
     print(f"edit {play.edit}")
     try:
-        if args.upload:
+        uploaded = {b["versionCode"] for b in
+                    play.call("GET", f"{play.base()}/bundles", mutating=False).get("bundles", [])}
+        if args.upload and args.build in uploaded:
+            # Play accepts each versionCode once. A second release of the same
+            # build (or a build uploaded before releases moved here) only needs
+            # its tracks set.
+            print(f"  versionCode {args.build} is already uploaded to Play; not re-uploading")
+        elif args.upload:
             aab = Path(args.upload)
             r = play.call("POST",
                           f"{UPLOAD}/{PACKAGE}/edits/{play.edit}/bundles?uploadType=media",
@@ -291,15 +283,11 @@ def cmd_release(play, args):
                 sys.exit(f"{aab.name} is versionCode {r.get('versionCode')}, "
                          f"not {args.build}")
             print(f"  uploaded {aab.name} ({aab.stat().st_size} bytes)")
-        elif not play.dry_run:
+        elif args.build not in uploaded:
             # Fail early and clearly if that versionCode was never uploaded,
             # rather than letting the commit fail with a less obvious message.
-            bundles = play.call("GET", f"{play.base()}/bundles", mutating=False)
-            codes = {b["versionCode"] for b in bundles.get("bundles", [])}
-            if args.build not in codes:
-                sys.exit(f"versionCode {args.build} is not uploaded "
-                         f"(uploaded: {sorted(codes)}); the release workflow uploads it "
-                         f"to the internal track on every merge to main")
+            sys.exit(f"versionCode {args.build} is not uploaded "
+                     f"(uploaded: {sorted(uploaded)}); pass --upload AAB")
 
         if text is not None:
             stage_listing(play, text)
@@ -313,11 +301,31 @@ def cmd_release(play, args):
                      else ""))
         # Committing an edit is what submits it for review, so there is no
         # separate submit step to gate.
-        play.commit(skip_if_busy=args.skip_if_busy)
+        play.commit()
     except BaseException:
         play.abandon()
         raise
     return 0
+
+
+def cmd_verify(play, args):
+    """The release read-back: exit non-zero unless the track holds a release
+    with versionCode N (and, when given, the expected status)."""
+    play.open_edit()
+    try:
+        track = play.call("GET", f"{play.base()}/tracks/{args.track}", mutating=False)
+    finally:
+        play.abandon()
+    for rel in track.get("releases", []):
+        if str(args.build) in (rel.get("versionCodes") or []):
+            status = rel.get("status")
+            if args.status and status != args.status:
+                sys.exit(f"verify: {args.track} has versionCode {args.build} "
+                         f"with status {status}, not {args.status}")
+            print(f"verified: {args.track} has versionCode {args.build} ({status})")
+            return 0
+    have = [rel.get("versionCodes") for rel in track.get("releases", [])]
+    sys.exit(f"verify: {args.track} does not have versionCode {args.build} (has {have})")
 
 
 def main():
@@ -342,9 +350,12 @@ def main():
                        help="staged rollout fraction 0-1 for non-internal tracks; "
                             "omit for a full release")
     p_rel.add_argument("--notes", help=f"release notes (default: {DEFAULT_NOTES!r})")
-    p_rel.add_argument("--skip-if-busy", action="store_true",
-                       help="exit 0 instead of cancelling changes already in review")
     p_rel.add_argument("--dry-run", action="store_true")
+
+    p_ver = sub.add_parser("verify", help="fail unless a track holds versionCode N")
+    p_ver.add_argument("--build", type=int, required=True)
+    p_ver.add_argument("--track", required=True, choices=TRACKS)
+    p_ver.add_argument("--status", choices=["completed", "inProgress"])
 
     args = ap.parse_args()
     rollout = getattr(args, "rollout", None)
@@ -352,8 +363,8 @@ def main():
         sys.exit("--rollout must be in (0, 1]")
 
     play = Play(dry_run=getattr(args, "dry_run", False))
-    return {"status": cmd_status, "listing": cmd_listing, "release": cmd_release}[args.verb](
-        play, args)
+    return {"status": cmd_status, "listing": cmd_listing, "release": cmd_release,
+            "verify": cmd_verify}[args.verb](play, args)
 
 
 if __name__ == "__main__":

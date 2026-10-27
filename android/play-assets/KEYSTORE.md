@@ -42,13 +42,13 @@ New repository secret**.)
 
 ## 3. That's it
 
-The next release (any push to `main`, or a manual `release` run) will detect the
-secret and produce `openrackem-<version>-android.aab` alongside the sideload
-APK. The very first one has to be uploaded in the Play Console by hand (Play
-will not accept an API upload for an app that has never had one); once the
-`PLAY_SERVICE_ACCOUNT_JSON` secret is set, `release.yml` uploads every later
-build to the internal track itself -- and to the public track named by the
-`PLAY_AUTO_TRACK` variable, when set. The full sequence is in
+Every build (`build.yml`, on each merge of `staging` into `main`) requires
+these secrets -- a missing one fails the build -- and produces
+`openrackem-<version>-android.aab` alongside the sideload APK. The very first
+AAB has to be uploaded in the Play Console by hand (Play will not accept an API
+upload for an app that has never had one); after that, the manual `release.yml`
+uploads each release's AAB to the track you choose, using the
+`PLAY_SERVICE_ACCOUNT_JSON` secret. The full sequence is in
 [docs/STORE-SETUP.md](../../docs/STORE-SETUP.md).
 
 ## Note on Play App Signing enrollment

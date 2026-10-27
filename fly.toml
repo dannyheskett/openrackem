@@ -1,8 +1,8 @@
 # openrackem multiplayer daemon (protocol v2: public and private rooms) — a
-# dedicated fly.io app. It is auto-deployed by the `deploy-server` job in
-# .github/workflows/release.yml on every release (a loopback 2/3/4-player match
-# gates the deploy). `fly deploy --ha=false` from the repo root remains the
-# manual fallback. The game's store builds are unrelated.
+# dedicated fly.io app. It is deployed by the `server` job of the manual
+# release workflow (.github/workflows/release.yml), after the stores, gated on a
+# loopback 2/3/4-player match and read back from /status. `fly deploy
+# --ha=false` from the repo root remains the manual fallback.
 #
 # The v1 daemon (Quick Match) still runs as the separate `openrackem-server`
 # app for clients that haven't updated. CI no longer deploys it; retire it by
