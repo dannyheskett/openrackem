@@ -100,13 +100,16 @@ jobs:
     name: linux + windows builds
     needs: prepare
     runs-on: ubuntu-22.04
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - name: Install Linux + mingw deps
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
+          # Retry and time out stalled package downloads instead of hanging
+          # until the job timeout (a slow mirror once cancelled a CI run).
+          echo 'Acquire::Retries "3"; Acquire::http::Timeout "30"; Acquire::https::Timeout "30";' | sudo tee /etc/apt/apt.conf.d/80-retries >/dev/null
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libgl1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev \
@@ -148,7 +151,7 @@ jobs:
     name: web (WASM) build
     needs: prepare
     runs-on: ubuntu-22.04
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - name: Set up Emscripten
@@ -156,6 +159,9 @@ jobs:
       # See game-ci.yml: the web target can transitively need the native Linux build.
       - name: Install Linux build deps + zip
         run: |
+          # Retry and time out stalled package downloads instead of hanging
+          # until the job timeout (a slow mirror once cancelled a CI run).
+          echo 'Acquire::Retries "3"; Acquire::http::Timeout "30"; Acquire::https::Timeout "30";' | sudo tee /etc/apt/apt.conf.d/80-retries >/dev/null
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libgl1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev \
