@@ -21,6 +21,12 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# bash -eo pipefail for every step: a failing command, including one inside a
+# pipe, fails its step.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   linux:
     runs-on: ubuntu-22.04
@@ -42,6 +48,12 @@ jobs:
       # store. Pure stdlib, so it costs nothing and needs no extra deps.
       - name: Validate the store listing files
         run: python3 scripts/store_listing.py --check
+      # The store scripts' failure handling: bounded retries, and replacing a
+      # pending App Review. Faked transport, no network.
+      - name: Test the store scripts
+        run: |
+          python3 -m pip install --quiet cryptography
+          python3 scripts/test_store_scripts.py
       - name: Build dev + release
         run: make all release
       - name: Build multiplayer daemon

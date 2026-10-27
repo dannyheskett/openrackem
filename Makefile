@@ -40,8 +40,8 @@ endif
 # Release version: a single integer. The release workflow passes
 # OPENRACKEM_VERSION explicitly; for local `make dist` it derives from the
 # latest release-N tag (or 0 if there are none). Only used to name archives.
-# RELEASE_VERSION is the project-neutral name the release workflow passes, so every
-# repo's release.yml is byte-identical. OPENRACKEM_VERSION still works as an explicit
+# RELEASE_VERSION is the project-neutral name the build workflow passes, so every
+# repo's build.yml passes the same variable. OPENRACKEM_VERSION still works as an explicit
 # override (command-line vars beat ?=), and a bare `make dist` still derives from tags.
 RELEASE_VERSION ?= $(shell git tag --list 'release-*' 2>/dev/null | sed -n 's/^release-\([1-9][0-9]*\)$$/\1/p' | sort -n | tail -1 | grep . || echo 0)
 OPENRACKEM_VERSION ?= $(RELEASE_VERSION)

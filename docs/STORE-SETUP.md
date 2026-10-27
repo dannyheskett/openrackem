@@ -1,18 +1,26 @@
 # Store setup: the parts only a human can do
 
-Every merge to `main` now ships to both stores on its own:
+Building and releasing are separate steps:
 
-- **App Store** -- `release.yml` uploads the .ipa (`publish-testflight`), then
-  `submit-appstore` creates version 1.0.N, attaches the build, pushes the
-  listing from `ios/app-store-assets/`, and submits it to App Review.
-- **Google Play** -- `publish-play` uploads the AAB and releases it to the
-  internal track, plus the public track named by the `PLAY_AUTO_TRACK`
-  repository variable (with the listing from `android/play-assets/`), in one
-  edit.
+- **Build** -- every merge of `staging` into `main` runs `build.yml`: it builds
+  every platform, tags `release-N`, and publishes the GitHub Release with all
+  the archives, including the signed .ipa and .aab. It never talks to either
+  store.
+- **Release** -- `release.yml` is run by hand and ships a chosen `release-N`
+  from its GitHub Release: Google Play first (upload the AAB, set the chosen
+  track, push the listing, all in one edit), then the App Store (upload the
+  .ipa, TestFlight notes for internal testers, create version 1.0.N, push the
+  listing, submit to App Review), then (this repo) the Fly server. It stops at
+  the first failure and reads each store back at the end:
 
-Both skip quietly (exit 0) while their store already has a review open; the
-next merge carries the change. `store-release.yml` is the manual way to ship a
-specific build, pick a track, or stage a rollout -- it defaults to a dry run.
+  ```sh
+  gh workflow run release.yml -f tag=release-36 -f stores=both -f android_track=alpha
+  gh run watch
+  ```
+
+  If an earlier version is still waiting for or in App Review, the release
+  withdraws it and submits the new one, and the log says exactly what it
+  withdrew. Temporary store errors are retried three times, then fail.
 
 The listings are pushed **from the repo on every release**. Edit
 `LISTING.md` and the screenshots here, not in either console -- console edits
@@ -35,10 +43,11 @@ What follows is what neither store has an API for.
    gh secret set ASC_KEY_P8  < ~/.config/openrackem/AuthKey_<new key id>.p8
    ```
 
-2. **Unblock the submission slot.** Apple holds one submission per app. While
-   1.0.19 is in review the job skips, which is fine. But if 1.0.19 is approved
-   and sitting in **Pending Developer Release**, it holds the slot until you
-   release it -- every merge will skip until you press *Release This Version*.
+2. **Keep automatic release on.** Apple holds one submission per app. A
+   release withdraws a version still waiting for or in review, but it cannot
+   withdraw one that is approved and held in **Pending Developer Release** --
+   that fails the release until you release or reject it. Leave the app set to
+   release automatically on approval so that never happens.
 
 3. **App Privacy label** (App Store Connect → the app → App Privacy). It is
    one-time and has no API. Re-check it covers online play: the matchmaking
@@ -47,11 +56,12 @@ What follows is what neither store has an API for.
 4. **Dry run it.** Nothing to install:
 
    ```sh
-   gh workflow run store-release.yml -f platform=ios     # dry_run defaults on
+   gh workflow run release.yml -f stores=appstore -f dry_run=true
    gh run watch
    ```
 
-   It prints every call it would make and the current version state.
+   The run is titled `DRY RUN`; it prints every call it would make and the
+   current version state, and ships nothing.
 
 ---
 
@@ -128,10 +138,10 @@ Reuse openblocks' publisher account -- it is one Play developer account:
    gh secret set PLAY_SERVICE_ACCOUNT_JSON < ~/.config/openrackem/play-publisher.json
    ```
 
-4. Check it: `gh workflow run store-release.yml -f platform=android` (dry run),
-   or locally `python3 scripts/play_release.py status` (it reads that same file).
+4. Check it: `gh workflow run release.yml -f stores=play -f dry_run=true`, or
+   locally `python3 scripts/play_release.py status` (it reads that same file).
 
-From the next merge on, every build lands on the internal track by itself.
+From then on, `release.yml` puts a build on whichever track you choose.
 
 ### 7. Closed testing -- the 14-day gate
 
@@ -144,11 +154,7 @@ Dashboard says whether this applies to the account.)
 2. Testing → **Closed testing** → the default track (the API calls it `alpha`)
    → Testers → add the group. Share the opt-in link; testers must accept it
    and stay opted in.
-3. Point the pipeline at it, so every merge reaches the testers:
-
-   ```sh
-   gh variable set PLAY_AUTO_TRACK -b alpha
-   ```
+3. Release to it: `gh workflow run release.yml -f android_track=alpha`.
 
 ### 8. Production
 
@@ -156,12 +162,8 @@ After the 14 days: Dashboard → **Apply for production** (a short
 questionnaire; Google's review takes several days). Once granted:
 
 ```sh
-gh variable set PLAY_AUTO_TRACK -b production
-gh variable set PLAY_AUTO_ROLLOUT -b 0.2        # optional: staged 20% rollout
+gh workflow run release.yml -f android_track=production -f rollout=0.2   # staged 20%
 ```
-
-Every merge now goes to production. To go back to internal-only:
-`gh variable delete PLAY_AUTO_TRACK`.
 
 ---
 
