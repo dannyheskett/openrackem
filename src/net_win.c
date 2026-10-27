@@ -427,15 +427,20 @@ NetConn* net_connect(const char* host, int port, const char* path, bool tls) {
     struct addrinfo* res = NULL;
     if (getaddrinfo(host, portstr, &hints, &res) != 0 || !res) { c->status = NET_ERROR; return c; }
 
-    SOCKET s = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (s == INVALID_SOCKET) { freeaddrinfo(res); c->status = NET_ERROR; return c; }
-    u_long nb = 1; ioctlsocket(s, FIONBIO, &nb);
-    BOOL one = TRUE; setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (char*)&one, sizeof one);
-    int rc = connect(s, res->ai_addr, (int)res->ai_addrlen);
-    freeaddrinfo(res);
-    if (rc == SOCKET_ERROR && WSAGetLastError() != WSAEWOULDBLOCK) {
-        closesocket(s); c->status = NET_ERROR; return c;
+    // Try each address in turn: an address family with no route (IPv6 on an
+    // IPv4-only network) fails at once, and the next address is tried.
+    SOCKET s = INVALID_SOCKET;
+    for (struct addrinfo* ai = res; ai; ai = ai->ai_next) {
+        SOCKET s2 = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (s2 == INVALID_SOCKET) continue;
+        u_long nb = 1; ioctlsocket(s2, FIONBIO, &nb);
+        BOOL one = TRUE; setsockopt(s2, IPPROTO_TCP, TCP_NODELAY, (char*)&one, sizeof one);
+        int rc = connect(s2, ai->ai_addr, (int)ai->ai_addrlen);
+        if (rc == 0 || WSAGetLastError() == WSAEWOULDBLOCK) { s = s2; break; }
+        closesocket(s2);
     }
+    freeaddrinfo(res);
+    if (s == INVALID_SOCKET) { c->status = NET_ERROR; return c; }
     c->sock = s;
 
     if (tls && !tls_begin(c)) { c->status = NET_ERROR; return c; }

@@ -194,15 +194,26 @@ NetConn* net_connect(const char* host, int port, const char* path, bool tls) {
         c->status = NET_ERROR;
         return c;
     }
-    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (fd < 0) { diag("socket", errno); freeaddrinfo(res); c->status = NET_ERROR; return c; }
-    int fl = fcntl(fd, F_GETFL, 0);
-    fcntl(fd, F_SETFL, fl | O_NONBLOCK);
-    int one = 1;
-    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-    int rc = connect(fd, res->ai_addr, res->ai_addrlen);
+    // Try each address in turn. The resolver may list IPv6 first on a network
+    // (or emulator) with no IPv6 route; that connect fails at once with
+    // ENETUNREACH, and the next address -- IPv4 -- is tried instead of giving up.
+    int fd = -1;
+    for (struct addrinfo* ai = res; ai; ai = ai->ai_next) {
+        int s2 = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (s2 < 0) { diag("socket", errno); continue; }
+        int fl = fcntl(s2, F_GETFL, 0);
+        fcntl(s2, F_SETFL, fl | O_NONBLOCK);
+        int one = 1;
+        setsockopt(s2, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+        if (connect(s2, ai->ai_addr, ai->ai_addrlen) == 0 || errno == EINPROGRESS) {
+            fd = s2;
+            break;
+        }
+        diag("connect", errno);
+        close(s2);
+    }
     freeaddrinfo(res);
-    if (rc != 0 && errno != EINPROGRESS) { diag("connect", errno); close(fd); c->status = NET_ERROR; return c; }
+    if (fd < 0) { c->status = NET_ERROR; return c; }
     c->fd = fd;
 
 #ifdef OR_TLS

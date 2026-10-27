@@ -3,9 +3,11 @@
 # PATH — invoked from the android-net CI job's emulator-runner script). Two
 # phases:
 #   1. Warmup: a freshly booted AVD reports boot_completed a second or two before
-#      its DNS resolver actually works, so an immediate getaddrinfo returns
-#      EAI_NONAME. That is emulator readiness, not a product fault, so retry ONLY
-#      that condition until the server resolves; any other failure fails hard.
+#      its DNS resolver and network actually work, so an immediate getaddrinfo
+#      returns EAI_NONAME, or every connect fails with ENETUNREACH. That is
+#      emulator readiness, not a product fault, so retry ONLY those two
+#      conditions (bounded: 30 tries) until the server answers; any other
+#      failure fails hard.
 #   2. Strict: run the test RUNS times and fail on the FIRST failure. This is the
 #      regression gate for the stale-OpenSSL-error-queue bug (a would-block
 #      SSL_read misreported as fatal) — after the ERR_clear_error() fix every run
@@ -28,6 +30,14 @@ for i in $(seq 1 30); do
     if echo "$out" | grep -q "OK: live wss round-trip verified"; then ready=1; break; fi
     if echo "$out" | grep -q "fail@getaddrinfo"; then
         echo "[warmup ${i}] resolver not ready yet; waiting"
+        sleep 3
+        continue
+    fi
+    # The same readiness gap, one layer down: the emulator's network
+    # interface can come up after boot_completed, and until then every
+    # connect fails with ENETUNREACH (errno 101).
+    if echo "$out" | grep -q "fail@connect errno=101"; then
+        echo "[warmup ${i}] network not up yet; waiting"
         sleep 3
         continue
     fi
