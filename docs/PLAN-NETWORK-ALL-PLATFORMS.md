@@ -167,8 +167,8 @@ TLS lib and a trust anchor.
   stale-but-not-errored socket recovers promptly.
 - **Testable:** cross-compiles in CI like the current APK (the prebuilt OpenSSL
   `.a` must match the NDK API level and stay 16 KB-page-aligned —
-  `check_elf_align.sh` already enforces this); live `wss` on emulator/device via
-  `scripts/devicefarm_run.py`.
+  `check_elf_align.sh` already enforces this); live `wss` on an emulator or
+  device.
 
 ## 7. Windows — winsock2 + SChannel (effort: L) — do last
 
@@ -263,7 +263,7 @@ Windows host to sign off.
   clients over loopback) — unchanged, and the regression guard for NW0.
 - **Per backend:** CI gates compile+link on every platform. Live `wss` against
   the Fly server is: automated for **Web** (Playwright) and **macOS** (CI runner);
-  Simulator/device for **iOS**/**Android** (`devicefarm_run.py`); a real Windows
+  Simulator/device for **iOS**/**Android**; a real Windows
   box for **Windows**.
 - **Cert verification** must reach parity with the POSIX `SSL_set1_host` on every
   backend that does its own verification (Windows SChannel, Android OpenSSL) —
