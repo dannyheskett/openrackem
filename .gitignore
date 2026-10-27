@@ -29,14 +29,6 @@ third_party/raylib-install*/
 .DS_Store
 Thumbs.db
 
-# --- openrackem only ---
-# Play signing material. Never commit these: the release workflow decodes the
-# keystore from a secret at build time.
-*.jks
-*.keystore
-*.p12
-*.b64
-
 # Tooling scratch
 .playwright-mcp/
 __pycache__/
@@ -44,3 +36,18 @@ __pycache__/
 third_party/openssl-android/
 third_party/cacert/
 build/openssl-src/
+
+# --- store signing material ---
+# Never commit these: the release workflow decodes the Play keystore and the
+# Apple distribution certificate from secrets at build time.
+*.jks
+*.keystore
+*.p12
+*.mobileprovision
+*.p8
+*.b64
+# ...and the material the signing certificate is built from.
+*.key
+*.csr
+*.cer
+*.pem
