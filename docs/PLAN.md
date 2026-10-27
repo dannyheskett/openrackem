@@ -16,7 +16,7 @@ RACK-O is a Hasbro trademark, licensed to Winning Moves. The name is unavailable
 |---|---|
 | Repo / binary | `openrackem` |
 | Header guards | `OPENRACKEM_*_H` |
-| Feature macros | `OR_TOUCH`, `OR_PORTRAIT`, `OR_LANDSCAPE`, `OR_RUNTIME_RENDERER`, `OR_SIMSTATS`, `OR_AUTOPLAY` |
+| Feature macros | `OR_TOUCH`, `OR_PORTRAIT`, `OR_LANDSCAPE`, `OR_RUNTIME_RENDERER` |
 | Android package | `com.danheskett.openrackem` |
 | iOS bundle id / app name | `com.danheskett.openrackem` / `Openrackem` |
 | Title bar / menu title | `OPENRACKEM` |
@@ -238,7 +238,7 @@ The AI takes its turn after a think delay counted in frames, so play is legible 
 
 Both paths produce the same `Action` values, so a keyboard and a thumb are literally indistinguishable to the engine.
 
-**Font.** Reuse `scripts/gen_font_atlas.c` to generate `font_atlas.h`. Rack cards need two-digit numbers legible at small portrait row heights, which is the tightest typographic constraint in the project and is validated on a real device via the existing Device Farm path.
+**Font.** Reuse `scripts/gen_font_atlas.c` to generate `font_atlas.h`. Rack cards need two-digit numbers legible at small portrait row heights, which is the tightest typographic constraint in the project.
 
 ## 10. Audio
 
@@ -272,11 +272,9 @@ Procedural, synthesized at startup, no audio files, sound off by default. Effect
 
 `Makefile` cloned from openrackem with the names swapped and the source list changed. Targets kept verbatim in structure: `all`, `release`, `run`, `windows` (x64 + x86 mingw), `mac` (universal), `android` (APK, no Gradle), `android-play` (AAB via aapt2 + bundletool), `web` (emcc + `web/shell.html`), `web-serve`, `ios` (unsigned .ipa, hand-assembled), `ios-sim`, `test`, `dist-*`, `clean`.
 
-Carried over unchanged in shape: `scripts/build_raylib_*.sh` (pinned raylib 6.0), `check_elf_align.sh` (16 KB page alignment for Play), `devicefarm_run.py`, `testflight_notes.py`, `gen_font_atlas.c`, the `.github/workflows/ci.yml` job matrix (linux, windows, mac, web, android, ios), `release.yml` (guard, prepare, per-platform builds, publish, publish-play, publish-testflight, testflight-notes), `attribution-guard.yml`, `dependabot.yml`, `.editorconfig`, `.gitignore`, `LICENSE` (MIT), `NOTICE`, `run.sh`.
+Carried over unchanged in shape: `scripts/build_raylib_*.sh` (pinned raylib 6.0), `check_elf_align.sh` (16 KB page alignment for Play), `testflight_notes.py`, `gen_font_atlas.c`, the `.github/workflows/ci.yml` job matrix (linux, windows, mac, web, android, ios), `release.yml` (guard, prepare, per-platform builds, publish, publish-play, publish-testflight, testflight-notes), `attribution-guard.yml`, `dependabot.yml`, `.editorconfig`, `.gitignore`, `LICENSE` (MIT), `NOTICE`, `run.sh`.
 
 The recorder (`recorder.c`, `encode_h264.c`, `encode_mux.c`, minih264 + minimp4 vendored) is carried over as-is: desktop-only, stubbed on mobile and web.
-
-`OR_SIMSTATS` / `OR_AUTOPLAY` are retained. Autoplay seats an AI in every chair (`human_seat = -1`) and starts a match at boot, which gives the Device Farm run a self-driving workload, exactly as gravity does for openrackem.
 
 ## 13. Milestones
 
@@ -284,11 +282,11 @@ Each milestone ends green: builds clean, `make test` passes, CI passes.
 
 - **M0 — Scaffold.** Repo created, openrackem files copied and renamed, build system and CI green with a stub `game.c`. Every platform target compiles before any rules exist.
 - **M1 — Rules engine.** `rules.c`, `game.c`, `game.h` complete and headless. `test_game.c` covers §11 in full. No rendering.
-- **M2 — AI.** `ai.c`, `GameView` redaction, difficulty tiers, `test_ai.c`. Full AI-only matches run to 500 under `OR_AUTOPLAY`.
+- **M2 — AI.** `ai.c`, `GameView` redaction, difficulty tiers, `test_ai.c`, in which full AI-only matches run to 500.
 - **M3 — Landscape and keyboard.** Table, round scoring, standings, menu, options. One complete human-versus-AI match playable on desktop.
 - **M4 — Portrait and touch.** Adaptive layout, safe area, gesture input, `test_input.c`. Android and web builds playable by thumb.
 - **M5 — Platform completion.** macOS universal, Windows x64/x86, WASM, Android APK + AAB, iOS Metal backend and .ipa, all six CI jobs green.
-- **M6 — Polish.** Sound effects, card animation, recorder wiring, README, screenshots, device validation via SIMSTATS.
+- **M6 — Polish.** Sound effects, card animation, recorder wiring, README, screenshots.
 - **M7 — release-1.** Store assets (Play listing, privacy, feature graphic, icons; App Store listing and icon), signing, `release.yml` end to end, tag `release-1`.
 
 ## 14. Constraints for the v2 hosted pool
@@ -334,8 +332,8 @@ openrackem/
   ios/    ios_main.mm gfx_metal.mm plat_ios.mm audio_ios.mm Info.plist Assets.xcassets
   android/ AndroidManifest.xml java/com/danheskett/openrackem/ res/ play-assets/
   web/    shell.html
-  scripts/ build_raylib_*.sh check_elf_align.sh devicefarm_run.py
-           testflight_notes.py gen_font_atlas.c requirements.txt
+  scripts/ build_raylib_*.sh check_elf_align.sh testflight_notes.py
+           gen_font_atlas.c
   tests/  test_game.c test_ai.c test_input.c
   .github/workflows/ ci.yml release.yml attribution-guard.yml
 ```
