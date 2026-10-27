@@ -199,43 +199,6 @@ static Game* new_game(int human_seat) {
     return game_create(&r);
 }
 
-#ifdef OR_SIMSTATS
-// Real-device validation instrumentation (SIMSTATS=1 builds; compiles on
-// desktop too for local smoke tests). Once per second of continuous play, log
-// how many frames were rendered vs how many fixed 60 Hz sim steps ran, so
-// scripts/devicefarm_run.py can assert from the device log that the
-// fixed-timestep accumulator holds ~60 steps/s at whatever refresh rate the
-// display actually delivers (the frames count is the evidence of that rate).
-// Any gap between calls (menu, pause, a stall past the spiral clamp) starts a
-// fresh window, so every logged line covers uninterrupted play.
-#if defined(PLATFORM_ANDROID)
-#include <android/log.h>
-#define SIMSTATS_LOG(...) __android_log_print(ANDROID_LOG_INFO, "openrackem", __VA_ARGS__)
-#else
-#define SIMSTATS_LOG(...) do { printf(__VA_ARGS__); printf("\n"); fflush(stdout); } while (0)
-#endif
-
-static void simstats_count(double now, int steps) {
-    static double win_start, last_call;
-    static int frames, sim_steps;
-    if (last_call == 0.0 || now - last_call > 0.25) { // gap: not continuous play
-        win_start = now;
-        frames = 0;
-        sim_steps = 0;
-    }
-    last_call = now;
-    frames++;
-    sim_steps += steps;
-    double span = now - win_start;
-    if (span >= 1.0) {
-        SIMSTATS_LOG("SIMSTATS window=%.3f frames=%d steps=%d", span, frames, sim_steps);
-        win_start = now;
-        frames = 0;
-        sim_steps = 0;
-    }
-}
-#endif // OR_SIMSTATS
-
 // Typing into a slot picker (name / room code). Each keystroke since the cursor
 // last moved is remembered as landed-in-a-slot or rejected (outside the
 // alphabet), so a backspace undoes exactly what the keystroke did: native
@@ -1288,9 +1251,6 @@ static void frame_step(void* arg) {
         unsigned frame_events = 0;
         uint8_t phase_before = g->phase;
         int steps = sim_clock_advance(&c->clock, dt);
-#ifdef OR_SIMSTATS
-        simstats_count(now, steps);
-#endif
         for (int s = 0; s < steps; s++) {
             game_update(g);
             frame_events |= g->events;
@@ -1319,12 +1279,8 @@ static void frame_step(void* arg) {
             }
         } else if (g->phase == PHASE_MATCH_OVER) {
             if (!phase_flipped && (in.confirm_pressed || in.touch_tap || in.left_pressed)) {
-#ifdef OR_AUTOPLAY
-                c->game = new_game(-1);
-#else
                 c->state = STATE_MENU; // the finished game stays for the menu's
                 c->selected = 0;       // non-resumable check
-#endif
             }
         } else {
             Action a;
@@ -1338,13 +1294,6 @@ static void frame_step(void* arg) {
                 }
             }
         }
-#ifdef OR_AUTOPLAY
-        // Validation builds run hands-off: auto-advance the round screens so an
-        // unattended device run plays match after match for its whole duration.
-        if (c->game->phase == PHASE_MATCH_OVER) {
-            c->game = new_game(-1);
-        }
-#endif
         play_event_sounds(c->game, frame_events);
         break;
     }
@@ -1423,10 +1372,6 @@ void app_init(void) {
     ios_ctx.quit = false;
     sim_clock_reset(&ios_ctx.clock);
     ios_ctx.prev_time = 0.0;
-#ifdef OR_AUTOPLAY
-    ios_ctx.game = new_game(-1);
-    ios_ctx.state = STATE_PLAYING;
-#endif
 }
 
 void app_frame(void) { frame_step(&ios_ctx); }
@@ -1474,12 +1419,6 @@ int main(int argc, char** argv) {
     ctx.quit = false;
     sim_clock_reset(&ctx.clock);
     ctx.prev_time = 0.0;
-#ifdef OR_AUTOPLAY
-    // Validation builds skip the menu and start playing at boot (see SIMSTATS
-    // in the Makefile); the AI fills every seat and keeps the simulation running.
-    ctx.game = new_game(-1);
-    ctx.state = STATE_PLAYING;
-#endif
 
 #ifdef PLATFORM_WEB
     // Browsers drive the loop via a per-frame callback; with the infinite-loop
