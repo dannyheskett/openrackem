@@ -251,8 +251,13 @@ jobs:
           [ "$short" = "1.0.$v" ] || { echo "::error::$ipa is version $short, not 1.0.$v"; exit 1; }
           echo "ios_build=$v" >> "$GITHUB_OUTPUT"
           echo "release $BUILD -> iOS build $v (version $short)"
+      # macOS runners' Homebrew Python refuses bare pip installs (PEP 668), so
+      # the dependency goes into a virtual environment.
       - name: Install the JWT dependency
-        run: python3 -m pip install --quiet cryptography
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet --disable-pip-version-check cryptography
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
       - name: Check whether App Store Connect already has this build
         id: state
         env:
