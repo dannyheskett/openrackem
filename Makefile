@@ -653,6 +653,22 @@ store-shots-ios: $(STORE_SHOTS_BIN)
 	python3 -c "import glob;from PIL import Image;[Image.open(f).convert('RGB').save(f) for f in glob.glob('$(IOS_SHOT_DIR)/*.png')]"
 	@echo "[ios] store shots -> $(IOS_SHOT_DIR)" 
 
+# The site demo: scripts/gen_demo.c plays a scripted game at 1280x720 and
+# pipes every frame to ffmpeg (60 s, 60 fps, fade through black at the loop
+# point, no audio), then writes the poster from the first table frame.
+#   make demo   -> build/demo/openrackem-demo.mp4 + openrackem-demo-poster.webp
+DEMO_BIN := build/gen_demo
+
+$(DEMO_BIN): scripts/gen_demo.c $(wildcard src/*.c src/*.h) | $(OBJ_DIR)
+	gcc $(CFLAGS_COMMON) -O2 -DPLATFORM_WEB -DOR_NET_STUB -I$(RAYLIB)/include \
+	    scripts/gen_demo.c $(SHOTS_SRC) -o $(DEMO_BIN) $(LDFLAGS)
+
+demo: $(DEMO_BIN)
+	mkdir -p build/demo
+	xvfb-run -a -s "-screen 0 1400x800x24" ./$(DEMO_BIN) build/demo
+	python3 -c "from PIL import Image; Image.open('build/demo/poster.png').convert('RGB').save('build/demo/openrackem-demo-poster.webp', quality=85)"
+	@echo "[demo] build/demo/openrackem-demo.mp4 + openrackem-demo-poster.webp"
+
 $(SHOTS_BIN): tests/vis_shots.c $(wildcard src/*.c src/*.h) | $(OBJ_DIR)
 	gcc $(CFLAGS_COMMON) -O2 -DPLATFORM_WEB -DOR_NET_STUB -I$(RAYLIB)/include \
 	    tests/vis_shots.c $(SHOTS_SRC) -o $(SHOTS_BIN) $(LDFLAGS)
@@ -830,6 +846,6 @@ clean:
 # Pull in auto-generated header dependencies (ignored if not yet present).
 -include $(OBJ:.o=.d) $(REL_OBJ:.o=.d) $(WIN64_OBJ:.o=.d) $(WIN32_OBJ:.o=.d) $(MAC_OBJ:.o=.d)
 
-.PHONY: all run release run-release windows mac web web-serve test ai-bench shots store-shots store-shots-ios server server-run net-e2e net-multi net-live mac-net-test win-net-build win-net-test android-net-build clean \
+.PHONY: all run release run-release windows mac web web-serve test ai-bench shots store-shots store-shots-ios demo server server-run net-e2e net-multi net-live mac-net-test win-net-build win-net-test android-net-build clean \
         android android-play ios ios-sim \
         dist dist-linux dist-windows dist-mac dist-web dist-android dist-android-play dist-ios
