@@ -164,8 +164,10 @@ static void deal_round(Game* g) {
 
 // Score the finished round and bank it. `winner` went out (NO_WINNER for a
 // stalemate: everyone keeps base sequence points, nobody collects 75). Also
-// decides the match: first player — or pair, under Partners — at or past the
-// target wins; ties break toward the round winner's side, then the lower seat.
+// decides the match: the player — or pair, under Partners — at or past the
+// target with the highest total wins. A dead tie for the top decides nothing:
+// the match plays another round until someone is clearly ahead, so no screen
+// ever tells one of two equal totals "you win" and the other "you lose".
 static void end_round(Game* g, int winner) {
     int n = g->rules.player_count;
     g->round_winner = (uint8_t)winner;
@@ -198,19 +200,17 @@ static void end_round(Game* g, int winner) {
             : g->players[s].score;
     }
     int best = -1;
+    bool tied = false;
     for (int s = 0; s < sides; s++) {
         if (totals[s] < g->rules.target_score) continue;
         if (best < 0 || totals[s] > totals[best]) {
             best = s;
+            tied = false;
         } else if (totals[s] == totals[best]) {
-            // Tie at or past the target: the side that went out this round
-            // prevails (it earned the closing 75); otherwise the lower seat.
-            int winner_side = (winner == NO_WINNER) ? -1
-                             : (g->rules.partners ? winner % 2 : winner);
-            if (s == winner_side) best = s;
+            tied = true;
         }
     }
-    if (best >= 0) {
+    if (best >= 0 && !tied) {
         g->match_winner = (uint8_t)best; // under Partners: pair index 0 or 1
         g->events |= EV_ROUND_END;       // the match banner shows after the
     } else {                             // round screens (game_next_round)

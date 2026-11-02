@@ -136,7 +136,7 @@ static void set_notice(NetGame* ng, const char* what) {
 // --- State reconstruction ----------------------------------------------------
 bool netgame_parse_state(NetGame* ng, const char* json, size_t len) {
     (void)len;
-    if (js_int(json, "v", -1) != 2) return false;
+    if (js_int(json, "v", -1) != NG_PROTO) return false;
 
     int players = (int)js_int(json, "players", 0);
     if (players < 2 || players > MAX_PLAYERS) return false;
@@ -229,7 +229,6 @@ bool netgame_parse_state(NetGame* ng, const char* json, size_t len) {
     long ws = js_int(json, "wait_seat", -1);
     ng->wait_seat = (ws >= 0 && ws < players) ? (int)ws : -1;
     ng->wait_ms = (int)js_int(json, "wait_ms", 0);
-    ng->wait_timer = js_int(json, "wait_timer", 0) != 0;
 
     // The last action drives the client-side flight tween: set up game.anim so
     // the existing renderers animate the move. `card` is what an observer saw
@@ -256,21 +255,20 @@ bool netgame_parse_state(NetGame* ng, const char* json, size_t len) {
     }
 
     ng->have_game = true;
+    ng->have_result = false;
     return true;
 }
 
 bool netgame_parse_lobby(NetGame* ng, const char* json) {
-    if (js_int(json, "v", -1) != 2) return false;
-    NgLobby* L = &ng->lobby;
+    if (js_int(json, "v", -1) != NG_PROTO) return false;
     NgLobby nl;
     memset(&nl, 0, sizeof nl);
     nl.id = js_int(json, "id", -1);
-    js_str(json, "code", nl.code, sizeof nl.code);
-    nl.priv = js_int(json, "private", 0) != 0;
     nl.target = (int)js_int(json, "target", 500);
     nl.bonus = js_int(json, "bonus", 0) != 0;
     nl.partners = js_int(json, "partners", 0) != 0;
-    nl.away_policy = js_int(json, "away", 0) ? 1 : 0;
+    long games = js_int(json, "games", 0);
+    nl.games = (games < 0) ? 0 : (games > 9999 ? 9999 : (int)games);
     long me = js_int(json, "me", -1);
     if (me < 0 || me >= MAX_PLAYERS) return false;
     nl.me = (int)me;
@@ -287,10 +285,7 @@ bool netgame_parse_lobby(NetGame* ng, const char* json) {
     nl.count_ms = (int)js_int(json, "count_ms", -1);
     js_str(json, "block", nl.block, sizeof nl.block);
     nl.can_force = js_int(json, "force", 0) != 0;
-    long sf = js_int(json, "swap_from", -1);
-    nl.swap_from = (sf >= 0 && sf < MAX_PLAYERS && nl.used[sf]) ? (int)sf : -1;
-    *L = nl;
-    snprintf(ng->code, sizeof ng->code, "%s", nl.code);
+    ng->lobby = nl;
     ng->room_id = nl.id;
     ng->have_lobby = true;
     return true;
@@ -299,7 +294,7 @@ bool netgame_parse_lobby(NetGame* ng, const char* json) {
 bool netgame_parse_rooms(NetGame* ng, const char* json) {
     int ids[NG_LIST_MAX], tg[NG_LIST_MAX], bo[NG_LIST_MAX], pa[NG_LIST_MAX];
     int n = js_ints(json, "ids", ids, NG_LIST_MAX);
-    js_ints(json, "targets", tg, NG_LIST_MAX);
+    int nt = js_ints(json, "targets", tg, NG_LIST_MAX);
     int nb = js_ints(json, "bonus", bo, NG_LIST_MAX);
     int np = js_ints(json, "partners", pa, NG_LIST_MAX);
     memset(ng->rooms, 0, sizeof ng->rooms);
@@ -308,7 +303,7 @@ bool netgame_parse_rooms(NetGame* ng, const char* json) {
     for (int i = 0; i < n; i++) {
         NgRoomRow* row = &ng->rooms[i];
         row->id = ids[i];
-        row->target = tg[i];
+        row->target = i < nt ? tg[i] : 500;
         row->bonus = i < nb && bo[i];
         row->partners = i < np && pa[i];
         if (np_ && (np_ = next_inner(np_)) != NULL) {
@@ -325,27 +320,6 @@ bool netgame_parse_rooms(NetGame* ng, const char* json) {
     if (ng->rooms_total < n) ng->rooms_total = n;
     ng->have_rooms = true;
     return true;
-}
-
-static void parse_peek(NetGame* ng, const char* json) {
-    NgPeek pk;
-    memset(&pk, 0, sizeof pk);
-    js_str(json, "code", pk.code, sizeof pk.code);
-    pk.known = true;
-    pk.ok = js_int(json, "ok", 0) != 0;
-    pk.playing = js_int(json, "playing", 0) != 0;
-    pk.target = (int)js_int(json, "target", 500);
-    char nm[MAX_PLAYERS][NG_NAME];
-    int n = js_strs(json, "names", nm, MAX_PLAYERS);
-    int rd[MAX_PLAYERS];
-    int k = js_ints(json, "ready", rd, MAX_PLAYERS);
-    for (int i = 0; i < n; i++) {
-        if (!nm[i][0]) continue;   // empty seat
-        memcpy(pk.names[pk.n], nm[i], NG_NAME);
-        pk.ready[pk.n] = i < k && rd[i];
-        pk.n++;
-    }
-    ng->peek = pk;
 }
 
 // --- Protocol send helpers ---------------------------------------------------
@@ -367,7 +341,7 @@ static void sendf(NetGame* ng, const char* fmt, ...) {
     if (n > 0 && (size_t)n < sizeof buf) send_json(ng, buf);
 }
 
-// Codes and keys from prefs are user-editable: keep them wire-safe.
+// Keys from prefs are user-editable: keep them wire-safe.
 static void copy_ident(char* out, size_t cap, const char* in) {
     size_t j = 0;
     if (in) for (size_t i = 0; in[i] && j + 1 < cap; i++) {
@@ -400,7 +374,6 @@ void netgame_start(NetGame* ng, const char* host, int port, bool tls,
     memset(ng, 0, sizeof *ng);
     ng->my_seat = -1;
     ng->wait_seat = -1;
-    ng->lobby.swap_from = -1;
     copy_ident(ng->name, sizeof ng->name, name);
     snprintf(ng->host, sizeof ng->host, "%s", host ? host : "127.0.0.1");
     ng->port = port;
@@ -416,13 +389,11 @@ static void to_idle(NetGame* ng) {
     ng->state = NG_IDLE;
     ng->in_room = false;
     ng->key[0] = '\0';
-    ng->owner[0] = '\0';
-    ng->code[0] = '\0';
     ng->have_lobby = false;
     ng->have_game = false;
-    ng->result_pending = false;
+    ng->have_result = false;
     ng->pending = false;
-    if (ng->listing) netgame_list(ng, ng->list_target);   // resubscribe
+    if (ng->listing) netgame_list(ng);   // resubscribe
 }
 
 static void handle_message(NetGame* ng, const char* msg, size_t n, unsigned* events) {
@@ -434,14 +405,11 @@ static void handle_message(NetGame* ng, const char* msg, size_t n, unsigned* eve
             sendf(ng, "{\"t\":\"rejoin\",\"key\":\"%s\"}", ng->key);
         } else {
             ng->state = NG_IDLE;
-            if (ng->listing) netgame_list(ng, ng->list_target);
+            if (ng->listing) netgame_list(ng);
         }
         ng->rejoining = false;
     } else if (strcmp(type, "welcome") == 0) {
         js_str(msg, "key", ng->key, sizeof ng->key);
-        char owner[NG_KEY];
-        if (js_str(msg, "owner", owner, sizeof owner)) memcpy(ng->owner, owner, NG_KEY);
-        js_str(msg, "code", ng->code, sizeof ng->code);
         ng->room_id = js_int(msg, "id", -1);
         ng->in_room = true;
         ng->stale_key[0] = '\0';   // surrendered (or reclaimed) by now
@@ -449,26 +417,24 @@ static void handle_message(NetGame* ng, const char* msg, size_t n, unsigned* eve
         ng->state = js_int(msg, "playing", 0) ? NG_PLAYING : NG_LOBBY;
     } else if (strcmp(type, "lobby") == 0) {
         if (netgame_parse_lobby(ng, msg)) {
-            // The match just ended: keep the result on screen until dismissed.
-            if (ng->state == NG_PLAYING && ng->have_game &&
-                ng->game.phase == PHASE_MATCH_OVER) {
-                ng->result_pending = true;
+            // The match just ended: the final standings stay available to
+            // the waiting room as its result line until the next deal.
+            if (ng->have_game && ng->game.phase == PHASE_MATCH_OVER) {
+                ng->have_result = true;
             }
+            ng->have_game = false;
             ng->state = NG_LOBBY;
             ng->pending = false;
         }
     } else if (strcmp(type, "state") == 0) {
         if (netgame_parse_state(ng, msg, n)) {
             ng->state = NG_PLAYING;
-            ng->result_pending = false;
             if (ng->game.phase != PHASE_ROUND_OVER) ng->confirmed_local = false;
             ng->pending = false;   // the authoritative result landed
             *events = ng->game.events;
         }
     } else if (strcmp(type, "rooms") == 0) {
         netgame_parse_rooms(ng, msg);
-    } else if (strcmp(type, "peeked") == 0) {
-        parse_peek(ng, msg);
     } else if (strcmp(type, "back") == 0) {
         js_str(msg, "name", ng->back_name, sizeof ng->back_name);
         ng->back_frames = NOTICE_FRAMES;
@@ -486,11 +452,12 @@ static void handle_message(NetGame* ng, const char* msg, size_t n, unsigned* eve
             ng->state = NG_ERROR;
             snprintf(ng->err, sizeof ng->err, "%s", code);
         } else if (strcmp(code, "no_seat") == 0) {
-            // The seat is gone (match over, forfeited, room expired).
+            // The seat is gone (match over and room closed, forfeited, grace
+            // expired).
             set_notice(ng, code);
             to_idle(ng);
         } else if (strcmp(code, "not_your_turn") != 0 && strcmp(code, "illegal") != 0) {
-            set_notice(ng, code);  // no_room, full, started, rate, team_full...
+            set_notice(ng, code);  // no_room, full, started, rate...
         }
     }
 }
@@ -537,7 +504,7 @@ unsigned netgame_update(NetGame* ng) {
 
     // First frame after the socket opens: say hello with our name.
     if (!ng->greeted) {
-        sendf(ng, "{\"t\":\"hello\",\"v\":2,\"name\":\"%s\"}", ng->name);
+        sendf(ng, "{\"t\":\"hello\",\"v\":%d,\"name\":\"%s\"}", NG_PROTO, ng->name);
         ng->greeted = true;
     }
     if (--ng->ping_frames <= 0) {
@@ -556,19 +523,14 @@ unsigned netgame_update(NetGame* ng) {
 void netgame_elapse(NetGame* ng, int ms) {
     if (ms <= 0) return;
     if (ng->deadline_ms > 0) ng->deadline_ms = ng->deadline_ms > ms ? ng->deadline_ms - ms : 0;
-    if (ng->wait_timer && ng->wait_ms > 0) ng->wait_ms = ng->wait_ms > ms ? ng->wait_ms - ms : 0;
+    if (ng->wait_ms > 0) ng->wait_ms = ng->wait_ms > ms ? ng->wait_ms - ms : 0;
     if (ng->lobby.count_ms > 0) ng->lobby.count_ms = ng->lobby.count_ms > ms ? ng->lobby.count_ms - ms : 0;
 }
 
 // --- Browsing -------------------------------------------------------------------
-void netgame_list(NetGame* ng, int target) {
+void netgame_list(NetGame* ng) {
     ng->listing = true;
-    ng->list_target = target < 0 ? 0 : target;
-    if (ng->state == NG_IDLE) sendf(ng, "{\"t\":\"list\",\"target\":%d}", ng->list_target);
-}
-
-void netgame_shuffle(NetGame* ng) {
-    if (ng->state == NG_IDLE) sendf(ng, "{\"t\":\"shuffle\",\"target\":%d}", ng->list_target);
+    if (ng->state == NG_IDLE) send_json(ng, "{\"t\":\"list\"}");
 }
 
 void netgame_unlist(NetGame* ng) {
@@ -576,24 +538,13 @@ void netgame_unlist(NetGame* ng) {
     ng->listing = false;
 }
 
-void netgame_peek(NetGame* ng, const char* code) {
-    char c[NG_CODE];
-    copy_ident(c, sizeof c, code);
-    if (!c[0] || ng->state != NG_IDLE) return;
-    memset(&ng->peek, 0, sizeof ng->peek);
-    snprintf(ng->peek.code, sizeof ng->peek.code, "%s", c);
-    sendf(ng, "{\"t\":\"peek\",\"code\":\"%s\"}", c);
-}
-
-void netgame_create(NetGame* ng, bool priv, const Rules* rules, bool wait_policy) {
+void netgame_create(NetGame* ng, const Rules* rules) {
     if (ng->state != NG_IDLE) return;
     Rules r = rules ? *rules : rules_default();
     char sk[64];
     stale_suffix(ng, sk, sizeof sk);
-    sendf(ng, "{\"t\":\"create\",\"private\":%d,\"target\":%d,\"bonus\":%d,"
-              "\"partners\":%d,\"away\":%d%s}",
-          priv ? 1 : 0, r.target_score, r.bonus_scoring ? 1 : 0,
-          r.partners ? 1 : 0, wait_policy ? 1 : 0, sk);
+    sendf(ng, "{\"t\":\"create\",\"target\":%d,\"bonus\":%d,\"partners\":%d%s}",
+          r.target_score, r.bonus_scoring ? 1 : 0, r.partners ? 1 : 0, sk);
 }
 
 void netgame_join_room(NetGame* ng, long id) {
@@ -601,21 +552,6 @@ void netgame_join_room(NetGame* ng, long id) {
     char sk[64];
     stale_suffix(ng, sk, sizeof sk);
     sendf(ng, "{\"t\":\"join\",\"room\":%ld%s}", id, sk);
-}
-
-void netgame_join_code(NetGame* ng, const char* code) {
-    if (ng->state != NG_IDLE) return;
-    char c[NG_CODE], sk[64];
-    copy_ident(c, sizeof c, code);
-    stale_suffix(ng, sk, sizeof sk);
-    sendf(ng, "{\"t\":\"join\",\"code\":\"%s\"%s}", c, sk);
-}
-
-void netgame_best(NetGame* ng, int target) {
-    if (ng->state != NG_IDLE) return;
-    char sk[64];
-    stale_suffix(ng, sk, sizeof sk);
-    sendf(ng, "{\"t\":\"best\",\"target\":%d%s}", target < 0 ? 0 : target, sk);
 }
 
 void netgame_rejoin(NetGame* ng, const char* key) {
@@ -629,31 +565,12 @@ void netgame_ready(NetGame* ng, bool on) {
     if (ng->state == NG_LOBBY) sendf(ng, "{\"t\":\"ready\",\"on\":%d}", on ? 1 : 0);
 }
 
-void netgame_team(NetGame* ng, int side) {
-    if (ng->state == NG_LOBBY) sendf(ng, "{\"t\":\"team\",\"side\":%d}", side ? 1 : 0);
-}
-
-void netgame_swap(NetGame* ng, int member) {
-    if (ng->state == NG_LOBBY && member >= 0 && member < MAX_PLAYERS)
-        sendf(ng, "{\"t\":\"swap\",\"seat\":%d}", member);
-}
-
-void netgame_swap_answer(NetGame* ng, int from, bool accept) {
-    if (ng->state == NG_LOBBY && from >= 0 && from < MAX_PLAYERS)
-        sendf(ng, "{\"t\":\"%s\",\"seat\":%d}", accept ? "swap_ok" : "swap_no", from);
+void netgame_team(NetGame* ng) {
+    if (ng->state == NG_LOBBY) send_json(ng, "{\"t\":\"team\"}");
 }
 
 void netgame_force(NetGame* ng) {
     if (ng->state == NG_LOBBY) send_json(ng, "{\"t\":\"force\"}");
-}
-
-void netgame_settings(NetGame* ng, int target, bool bonus, bool partners,
-                      bool priv, bool wait_policy) {
-    if (ng->state != NG_LOBBY || !ng->owner[0]) return;
-    sendf(ng, "{\"t\":\"settings\",\"owner\":\"%s\",\"target\":%d,\"bonus\":%d,"
-              "\"partners\":%d,\"private\":%d,\"away\":%d}",
-          ng->owner, target, bonus ? 1 : 0, partners ? 1 : 0, priv ? 1 : 0,
-          wait_policy ? 1 : 0);
 }
 
 // --- Leaving and returning --------------------------------------------------------
@@ -683,7 +600,7 @@ void netgame_letai(NetGame* ng, int seat) {
 
 // --- Playing ------------------------------------------------------------------------
 bool netgame_my_turn(const NetGame* ng) {
-    if (ng->state != NG_PLAYING || !ng->have_game || ng->result_pending) return false;
+    if (ng->state != NG_PLAYING || !ng->have_game) return false;
     return ng->game.turn == ng->my_seat &&
            (ng->game.phase == PHASE_DRAW || ng->game.phase == PHASE_PLACE);
 }
@@ -700,11 +617,6 @@ void netgame_confirm(NetGame* ng) {
     if (ng->confirmed_local) return;
     ng->confirmed_local = true;
     send_json(ng, "{\"t\":\"next\"}");
-}
-
-void netgame_dismiss_result(NetGame* ng) {
-    ng->result_pending = false;
-    ng->have_game = false;
 }
 
 void netgame_close(NetGame* ng) {

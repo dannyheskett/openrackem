@@ -19,7 +19,7 @@ SRC := src/main.c src/rules.c src/game.c src/ai.c src/tick.c src/input.c \
        src/safe_area.c src/menu.c src/present.c src/window.c \
        src/sound.c src/audio_raylib.c \
        src/netgame.c src/net_ws.c src/net_posix.c src/net_stub.c src/net_web.c \
-       src/net_win.c src/prefs.c src/softkbd.c src/online_ui.c src/share.c \
+       src/net_win.c src/prefs.c src/softkbd.c src/online_ui.c \
        src/recorder.c src/encode_h264.c src/encode_mux.c
 
 # Shared standard/warning flags and vendored-header include paths.
@@ -440,7 +440,7 @@ IOS_C_SRC      := src/rules.c src/game.c src/ai.c src/tick.c src/main.c \
                   src/render.c src/render_portrait.c \
                   src/input.c src/sound.c src/recorder.c src/safe_area.c \
                   src/menu.c src/present.c src/window.c \
-                  src/netgame.c src/prefs.c src/softkbd.c src/online_ui.c src/share.c
+                  src/netgame.c src/prefs.c src/softkbd.c src/online_ui.c
 IOS_MM_SRC     := ios/ios_main.mm ios/gfx_metal.mm ios/plat_ios.mm ios/audio_ios.mm
 # The online client (net_apple.mm, Network.framework) is Obj-C++ compiled
 # WITHOUT ARC (it hand-retains nw_/dispatch objects held in a C struct), so it
@@ -597,7 +597,7 @@ $(TEST_AI_BIN): tests/test_ai.c $(wildcard src/*.c src/*.h) | $(OBJ_DIR)
 $(TEST_INPUT_BIN): tests/test_input.c $(wildcard src/*.c src/*.h) | $(OBJ_DIR)
 	gcc $(CFLAGS_COMMON) -O0 -g -DPLATFORM_IOS tests/test_input.c -o $(TEST_INPUT_BIN)
 
-# test_server — the daemon core (rooms, tokens, timers, matchmaking, redacted
+# test_server — the daemon core (rooms, keys, timers, the room list, redacted
 # broadcast) plus the ws/wire codecs, driven socket-free with injected time.
 $(TEST_SERVER_BIN): tests/test_server.c $(wildcard src/*.c src/*.h src-server/*.c src-server/*.h) | $(OBJ_DIR)
 	gcc $(CFLAGS_COMMON) -Isrc-server -O0 -g tests/test_server.c -o $(TEST_SERVER_BIN)

@@ -38,8 +38,7 @@ typedef struct {
     uint8_t away[MAX_PLAYERS];
     int     deadline_ms;   // current turn / round-screen countdown (0 = none)
     int     wait_seat;     // seat the table is waiting for (-1 = none)
-    int     wait_ms;       // ...remaining, when wait_timer
-    bool    wait_timer;    // false = waiting until they return
+    int     wait_ms;       // ...remaining before the AI takes the seat
     char    back[16];      // name of a player who just came back ("" = none)
 } OnlineHud;
 void render_set_online_hud(const OnlineHud* hud);

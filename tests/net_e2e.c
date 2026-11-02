@@ -54,7 +54,7 @@ int main(void) {
     CHECK(srv > 0);
     sleep_ms(300);   // let it bind/listen
 
-    // Two clients: A creates a private room, B joins by its code, both ready.
+    // Two clients: A creates a room, B finds it in the list and joins, both ready.
     NetGame a, b;
     Rules r = rules_default();
     r.target_score = 50;    // shortest match: one player going out decides it
@@ -65,14 +65,21 @@ int main(void) {
         pump(&b);
     }
     CHECK(a.state == NG_IDLE && b.state == NG_IDLE);
-    netgame_create(&a, true, &r, false);
+    netgame_create(&a, &r);
 
-    // Pump A until it has a room code.
-    for (int i = 0; i < 2000 && a.code[0] == '\0'; i++) pump(&a);
-    CHECK(a.code[0] != '\0');
-    printf("  room code: %s\n", a.code);
+    // Pump A until it is in its waiting room; B sees the room in the list.
+    for (int i = 0; i < 2000 && !a.have_lobby; i++) pump(&a);
+    CHECK(a.have_lobby);
+    printf("  room id: %ld\n", a.room_id);
+    netgame_list(&b);
+    bool seen = false;
+    for (int i = 0; i < 2000 && !seen; i++) {
+        pump(&a); pump(&b);
+        for (int k = 0; k < b.room_count; k++) seen |= b.rooms[k].id == a.room_id;
+    }
+    CHECK(seen);
 
-    netgame_join_code(&b, a.code);
+    netgame_join_room(&b, a.room_id);
     for (int i = 0; i < 2000 && b.state != NG_LOBBY; i++) { pump(&a); pump(&b); }
     CHECK(b.state == NG_LOBBY);
     netgame_ready(&a, true);
@@ -108,6 +115,8 @@ int main(void) {
         for (int who = 0; who < 2; who++) {
             NetGame* ng = who ? &b : &a;
             uint64_t* rng = who ? &rng_b : &rng_a;
+            // Back in the waiting room with the result: this seat is done.
+            if (ng->have_result && ng->game.phase == PHASE_MATCH_OVER) { at_match_over++; continue; }
             if (!ng->have_game) continue;
 
             if (netgame_my_turn(ng) && !ng->pending) {
@@ -116,7 +125,6 @@ int main(void) {
             } else if (ng->state == NG_PLAYING && ng->game.phase == PHASE_ROUND_OVER) {
                 netgame_confirm(ng);
             }
-            if (ng->result_pending && ng->game.phase == PHASE_MATCH_OVER) at_match_over++;
             if (ng->state == NG_ERROR) { printf("  client %d error: %s\n", who, ng->err); CHECK(0); over = true; }
         }
         // Finish only when BOTH clients have seen the match-over state and are

@@ -833,12 +833,10 @@ static void draw_online_wait(const Game* game) {
     int tfs = fs;
     while (tfs > 9 && gfx_measure_text(title, tfs) > pw - 2 * m) tfs--;
     text_centered(title, w / 2, py + m, tfs, ACCENT);
-    if (hud->wait_timer) {
+    {
         char clock[12];
         fmt_clock(clock, sizeof clock, hud->wait_ms);
         snprintf(sub, sizeof sub, "THE AI TAKES OVER IN %s", clock);
-    } else {
-        snprintf(sub, sizeof sub, "UNTIL THEY COME BACK");
     }
     text_centered(sub, w / 2, py + m + fs + m / 2, fs2, WHITE);
     int bw = pw * 3 / 5, bx = w / 2 - bw / 2, bth = py + ph - m - btn_h;
