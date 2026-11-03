@@ -22,7 +22,7 @@ static bool eat(Cur* c, char ch) {
     return false;
 }
 
-// Identifier-safe characters only: room codes, tokens, and message names need
+// Identifier-safe characters only: tokens and message names need
 // nothing more, and rejecting everything else means no escape handling ever.
 static bool ident_char(char ch) {
     return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||

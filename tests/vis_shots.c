@@ -56,7 +56,7 @@ static void shoot_online(const char* mode) {
     memset(&ng, 0, sizeof ng);
     ng.state = NG_IDLE;
     ng.have_rooms = true;
-    ng.rooms_total = 37;
+    ng.rooms_total = 4;
     static const char* const r0[] = {"Sam", "Lee", "Kim"};
     static const char* const r1[] = {"Jo"};
     static const char* const r2[] = {"Ana", "Raj"};
@@ -74,24 +74,17 @@ static void shoot_online(const char* mode) {
         if (i == 0) ng.rooms[i].ready[1] = 1;
     }
     ng.room_count = 4;
-    ng.peek.known = ng.peek.ok = true;
-    snprintf(ng.peek.code, sizeof ng.peek.code, "K7QM");
-    static const char* const pk[] = {"Dan", "Alex"};
-    set_names(ng.peek.names, pk, 2);
-    ng.peek.n = 2;
-    ng.peek.ready[0] = 1;
 
-    OnlineView v = { .ng = &ng, .player = "DAN", .saved_code = "K7QM",
-                     .has_return = false, .sel = 0 };
+    OnlineView v = { .ng = &ng, .player = "DAN", .has_return = false, .sel = 0 };
     for (int i = 0; i < 3; i++) online_render_list(&v);
     snap(mode, "online-list");
     v.has_return = true;
-    v.sel = 5;
+    v.sel = 3;
     v.notice = "THAT ROOM IS FULL";
     for (int i = 0; i < 3; i++) online_render_list(&v);
     snap(mode, "online-list-return");
 
-    // A public waiting room: three in, one ready.
+    // A waiting room: three in, one ready.
     ng.state = NG_LOBBY;
     NgLobby* L = &ng.lobby;
     memset(L, 0, sizeof *L);
@@ -103,25 +96,32 @@ static void shoot_online(const char* mode) {
     L->ready[1] = 1;
     L->count_ms = -1;
     snprintf(L->block, sizeof L->block, "ready");
-    L->swap_from = -1;
-    OnlineView lv = { .ng = &ng, .player = "DAN", .saved_code = "", .sel = 0 };
+    OnlineView lv = { .ng = &ng, .player = "DAN", .sel = 0 };
     for (int i = 0; i < 3; i++) online_render_lobby(&lv);
-    snap(mode, "online-lobby-public");
+    snap(mode, "online-lobby");
 
-    // A private room counting down, owner, Wait policy, one player reconnecting.
-    L->priv = true;
-    snprintf(L->code, sizeof L->code, "K7QM");
-    L->away_policy = 1;
+    // Between games: the last result on show, counting down, one player
+    // reconnecting.
+    L->games = 2;
     L->bonus = true;
     for (int i = 0; i < 3; i++) L->ready[i] = 1;
     L->on[2] = 0;
     L->block[0] = '\0';
     L->count_ms = 1400;
-    lv.is_owner = true;
+    ng.have_result = true;
+    ng.game.phase = PHASE_MATCH_OVER;
+    ng.game.rules.player_count = 3;
+    ng.game.match_winner = 1;
+    ng.game.players[0].score = 430;
+    ng.game.players[1].score = 515;
+    ng.game.players[2].score = 300;
+    static const char* const hn[] = {"Dan", "Alex", "Priya"};
+    set_names(ng.handles, hn, 3);
     for (int i = 0; i < 3; i++) online_render_lobby(&lv);
-    snap(mode, "online-lobby-private");
+    snap(mode, "online-lobby-result");
 
-    // Partners: full teams, someone asks us to swap.
+    // Partners: full teams.
+    ng.have_result = false;
     L->partners = true;
     L->count_ms = -1;
     snprintf(L->block, sizeof L->block, "ready");
@@ -130,9 +130,6 @@ static void shoot_online(const char* mode) {
     for (int i = 0; i < 4; i++) { L->used[i] = 1; L->on[i] = 1; L->ready[i] = 0; L->team[i] = i & 1; }
     for (int i = 0; i < 3; i++) online_render_lobby(&lv);
     snap(mode, "online-lobby-partners");
-    L->swap_from = 1;
-    for (int i = 0; i < 3; i++) online_render_lobby(&lv);
-    snap(mode, "online-lobby-swap");
 }
 
 // The table with the online overlay: an away seat, the turn clock, and the
@@ -153,7 +150,6 @@ static void shoot_online_table(const char* mode) {
     hud.back[0] = '\0';
     hud.wait_seat = 2;
     hud.wait_ms = 23000;
-    hud.wait_timer = true;
     render_set_online_hud(&hud);
     g->turn = 2;
     shoot(mode, "online-wait", g, &ui);

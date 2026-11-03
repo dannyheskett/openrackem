@@ -26,8 +26,8 @@ in the listing by filename, hence the `01-`/`02-` prefixes.
 make store-shots-ios      # -> screenshots/iphone-6.9/ at native 1290x2796
 ```
 
-`scripts/gen_store_shots.c` stages four deterministic scenes (fixed seed, scripted
-actions) and `TakeScreenshot`s each one. The target runs it under xvfb at the
+`scripts/gen_store_shots.c` stages five deterministic scenes (fixed seed, scripted
+actions, a fabricated online waiting room) and `TakeScreenshot`s each one. The target runs it under xvfb at the
 native App Store size and then strips the alpha channel, which raylib's
 screenshots carry and which Apple rejects. A bare `make store-shots` still writes
 the 540x960 Play set to `build/store-shots/`.

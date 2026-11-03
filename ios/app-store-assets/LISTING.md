@@ -44,7 +44,7 @@ Editable anytime without submitting a new build — use it for release notes or
 seasonal copy.
 
 ```
-No ads, no tracking, no accounts. Play the computer offline, or take on friends online with a room code.
+No ads, no tracking, no accounts. Play the computer offline, or take on friends online in a room.
 ```
 
 ## Keywords (<=100 chars, comma-separated, no spaces after commas)
@@ -68,7 +68,7 @@ No ads. No tracking. No accounts. No in-app purchases.
 
 PLAY YOUR WAY
 • Offline against AI opponents in three strengths
-• Online for 2 to 4 players — quick match, or share a room code with friends
+• Online for 2 to 4 players — make a room or join one, and play game after game
 • Full official rules, including the two-player run-of-three requirement
 • Optional Bonus scoring and Partners team play
 

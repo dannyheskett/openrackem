@@ -42,7 +42,6 @@ static void hit_add(int id, int x, int y, int w, int h) {
 }
 
 int online_hit_test(Vector2 p) {
-    // Later targets draw on top (the swap prompt over the buttons): test them first.
     for (int i = s_hit_n - 1; i >= 0; i--) {
         if (CheckCollisionPointRec(p, s_hits[i].r)) return s_hits[i].id;
     }
@@ -98,10 +97,7 @@ static void rules_line(char* out, size_t n, int target, bool bonus, bool partner
 int online_list_rows(const OnlineView* v, OlRow rows[OL_MAX_ROWS]) {
     int n = 0;
     if (v->has_return) rows[n++] = (OlRow){ OLR_RETURN, -1 };
-    if (v->saved_code && v->saved_code[0]) rows[n++] = (OlRow){ OLR_SAVED, -1 };
     rows[n++] = (OlRow){ OLR_NEW, -1 };
-    rows[n++] = (OlRow){ OLR_CODE, -1 };
-    if (v->ng->rooms_total > 0) rows[n++] = (OlRow){ OLR_BEST, -1 };
     for (int i = 0; i < v->ng->room_count && n < OL_MAX_ROWS; i++) {
         rows[n++] = (OlRow){ OLR_ROOM, i };
     }
@@ -134,38 +130,9 @@ static void draw_row(const OnlineView* v, const OlRow* row, int idx, int x, int 
         snprintf(t, sizeof t, "RETURN TO GAME");
         snprintf(s, sizeof s, "YOUR SEAT IS WAITING FOR YOU");
         break;
-    case OLR_SAVED: {
-        snprintf(t, sizeof t, "YOUR ROOM  %s", v->saved_code);
-        const NgPeek* pk = &ng->peek;
-        bool for_us = pk->known && strcmp(pk->code, v->saved_code) == 0;
-        if (!for_us) snprintf(s, sizeof s, "CHECKING...");
-        else if (!pk->ok) snprintf(s, sizeof s, "EXPIRED - CHOOSE TO MAKE A NEW PRIVATE ROOM");
-        else if (pk->playing) snprintf(s, sizeof s, "A GAME IS IN PROGRESS");
-        else if (pk->n == 0) snprintf(s, sizeof s, "EMPTY - BE THE FIRST IN");
-        else {
-            gfx_text(t, x + pad, ty, fit(t, tfs, tw), ink);
-            char nm[MAX_PLAYERS][NG_NAME];
-            for (int i = 0; i < pk->n; i++) memcpy(nm[i], pk->names[i], NG_NAME);
-            char cnt[16];
-            snprintf(cnt, sizeof cnt, "%d/4", pk->n);
-            int cw = gfx_measure_text(cnt, sfs);
-            draw_names(x + pad, sy, sfs, tw - cw - sfs, nm, pk->ready, pk->n, WHITE);
-            gfx_text(cnt, x + rw - pad - cw, sy, sfs, SLOT_LABEL);
-            return;
-        }
-        break;
-    }
     case OLR_NEW:
         snprintf(t, sizeof t, "NEW ROOM");
-        snprintf(s, sizeof s, "PUBLIC OR PRIVATE");
-        break;
-    case OLR_CODE:
-        snprintf(t, sizeof t, "ENTER CODE");
-        snprintf(s, sizeof s, "JOIN A PRIVATE ROOM");
-        break;
-    case OLR_BEST:
-        snprintf(t, sizeof t, "JOIN BEST ROOM");
-        snprintf(s, sizeof s, "THE ONE CLOSEST TO STARTING");
+        snprintf(s, sizeof s, "START A TABLE AND WAIT FOR PLAYERS");
         break;
     case OLR_ROOM: {
         const NgRoomRow* rr = &ng->rooms[row->room];
@@ -201,19 +168,10 @@ static void draw_list_cb(void* p) {
     char who[40];
     snprintf(who, sizeof who, "PLAYING AS %s", v->player);
     text_centered(who, w / 2, y, fit(who, small_fs, w - 2 * m), SLOT_LABEL);
-    y += small_fs + m / 2;
-
-    // Play To filter and Shuffle.
-    int ctl_h = clampi(h / 20, 22, 110);
-    int fw = (w - 2 * m) * 3 / 5, sw = (w - 2 * m) - fw - m / 2;
-    char filt[32];
-    if (v->filter) snprintf(filt, sizeof filt, "PLAY TO: %d", v->filter);
-    else snprintf(filt, sizeof filt, "PLAY TO: ANY");
-    draw_button(OL_HIT_FILTER, m, y, fw, ctl_h, filt, false, false);
-    draw_button(OL_HIT_SHUFFLE, m + fw + m / 2, y, sw, ctl_h, "SHUFFLE", false, false);
-    y += ctl_h + m / 2;
+    y += small_fs + m;
 
     // Back, at the bottom.
+    int ctl_h = clampi(h / 20, 22, 110);
     int back_h = ctl_h, back_y = h - m - back_h;
     draw_button(OL_HIT_BACK, w / 2 - (w - 2 * m) / 4, back_y, (w - 2 * m) / 2, back_h,
                 "BACK", false, false);
@@ -230,16 +188,15 @@ static void draw_list_cb(void* p) {
 
     char hdr[64];
     int pub = n - pinned;
-    if (!ng->have_rooms) snprintf(hdr, sizeof hdr, "LOOKING FOR PUBLIC ROOMS...");
-    else if (pub == 0) snprintf(hdr, sizeof hdr, "NO PUBLIC ROOMS YET - MAKE ONE");
-    else if (ng->rooms_total > pub) snprintf(hdr, sizeof hdr, "PUBLIC ROOMS - %d OF %d", pub, ng->rooms_total);
-    else snprintf(hdr, sizeof hdr, "PUBLIC ROOMS");
+    if (!ng->have_rooms) snprintf(hdr, sizeof hdr, "LOOKING FOR ROOMS...");
+    else if (pub == 0) snprintf(hdr, sizeof hdr, "NO ROOMS WAITING - MAKE ONE");
+    else if (ng->rooms_total > pub) snprintf(hdr, sizeof hdr, "ROOMS - %d OF %d", pub, ng->rooms_total);
+    else snprintf(hdr, sizeof hdr, "ROOMS - TAP ONE TO JOIN");
     y += m / 3;
     gfx_text(hdr, m, y, fit(hdr, small_fs, rw), SLOT_LABEL);
     y += small_fs + m / 2;
 
-    // The public rooms scroll beneath the pinned rows, keeping the selection
-    // in view.
+    // The rooms scroll beneath the pinned rows, keeping the selection in view.
     int area_bottom = back_y - m / 2 - small_fs - m / 3;
     int visible = (area_bottom - y) / (row_h + gap);
     if (visible < 1) visible = 1;
@@ -272,45 +229,62 @@ void online_render_list(OnlineView* v) {
 }
 
 // --- Waiting room ---------------------------------------------------------------------
-int online_lobby_buttons(const OnlineView* v, int ids[8]) {
+int online_lobby_buttons(const OnlineView* v, int ids[4]) {
     const NgLobby* L = &v->ng->lobby;
     int n = 0;
-    if (L->swap_from >= 0) {
-        ids[n++] = OLB_ACCEPT;
-        ids[n++] = OLB_DECLINE;
-        return n;
-    }
     ids[n++] = OLB_READY;
     if (L->can_force) ids[n++] = OLB_FORCE;
-    if (L->partners) {
-        int other = 0;
-        for (int i = 0; i < MAX_PLAYERS; i++) {
-            if (L->used[i] && i != L->me && L->team[i] != L->team[L->me]) other++;
-        }
-        if (other < 2) ids[n++] = OLB_SWITCH;
-    }
-    if (L->priv) ids[n++] = OLB_SHARE;
-    if (v->is_owner) ids[n++] = OLB_SETTINGS;
+    if (L->partners) ids[n++] = OLB_SWITCH;
     ids[n++] = OLB_LEAVE;
     return n;
 }
 
 static const char* button_label(int id, const NgLobby* L) {
     switch (id) {
-    case OLB_READY:    return L->ready[L->me] ? "NOT READY" : "READY TO PLAY";
-    case OLB_FORCE:    return "START WITHOUT THEM";
-    case OLB_SWITCH:   return "SWITCH TEAM";
-    case OLB_SHARE:    return "SHARE";
-    case OLB_SETTINGS: return "SETTINGS";
-    case OLB_LEAVE:    return "LEAVE";
-    case OLB_ACCEPT:   return "ACCEPT";
-    case OLB_DECLINE:  return "DECLINE";
+    case OLB_READY:  return L->ready[L->me] ? "NOT READY" : "READY TO PLAY";
+    case OLB_FORCE:  return "START WITHOUT THEM";
+    case OLB_SWITCH: return "SWITCH TEAM";
+    case OLB_LEAVE:  return "LEAVE";
     }
     return "";
 }
 
-// One member row: dot, name, tags. `swap_hit` makes it a swap target.
-static void draw_member(const NgLobby* L, int mi, int x, int y, int rw, int rh, bool swap_hit) {
+void online_result_line(const NetGame* ng, char* out, size_t cap) {
+    out[0] = '\0';
+    const Game* g = &ng->game;
+    if (!ng->have_result || g->phase != PHASE_MATCH_OVER || g->match_winner == NO_WINNER) return;
+    int n = g->rules.player_count;
+    if (n < 2 || n > MAX_PLAYERS) return;
+    size_t k = 0;
+    if (g->rules.partners) {
+        int w = g->match_winner & 1;
+        k = (size_t)snprintf(out, cap, "%s & %s WON  %d - %d",
+                             ng->handles[w], ng->handles[w + 2],
+                             g->players[w].score + g->players[w + 2].score,
+                             g->players[1 - w].score + g->players[3 - w].score);
+    } else {
+        int w = g->match_winner;
+        if (w >= n) return;
+        k = (size_t)snprintf(out, cap, "%s WON ", ng->handles[w]);
+        // Scores in finishing order.
+        int order[MAX_PLAYERS];
+        for (int i = 0; i < n; i++) order[i] = i;
+        for (int i = 1; i < n; i++) {
+            for (int j = i; j > 0 &&
+                 g->players[order[j]].score > g->players[order[j - 1]].score; j--) {
+                int t = order[j]; order[j] = order[j - 1]; order[j - 1] = t;
+            }
+        }
+        for (int i = 0; i < n && k < cap; i++) {
+            k += (size_t)snprintf(out + k, cap - k, "%s%d", i ? " - " : " ",
+                                  g->players[order[i]].score);
+        }
+    }
+    (void)k;
+}
+
+// One member row: dot, name, tags.
+static void draw_member(const NgLobby* L, int mi, int x, int y, int rw, int rh) {
     bool used = L->used[mi];
     bool me = used && mi == L->me;
     rect_rounded_px(x, y, rw, rh, rh / 4, me ? PANEL_SEL : PANEL);
@@ -325,7 +299,7 @@ static void draw_member(const NgLobby* L, int mi, int x, int y, int rw, int rh, 
     draw_dot(x + pad + r, y + rh / 2, r, L->ready[mi], !on);
     int nx = x + pad + 2 * r + pad / 2;
     // The name comes first: a tag that would crowd it below 3/4 size goes.
-    const char* tag = me ? "(YOU)" : !on ? "AWAY" : swap_hit ? "SWAP" : "";
+    const char* tag = me ? "(YOU)" : !on ? "AWAY" : "";
     int tfs = fs * 3 / 4;
     int tag_w = tag[0] ? gfx_measure_text(tag, tfs) + pad : 0;
     int nfs = fit(L->names[mi], fs, x + rw - pad - tag_w - nx);
@@ -338,7 +312,6 @@ static void draw_member(const NgLobby* L, int mi, int x, int y, int rw, int rh, 
         gfx_text(tag, x + rw - pad - gfx_measure_text(tag, tfs), y + (rh - tfs) / 2, tfs,
                  me ? ACCENT : SLOT_LABEL);
     }
-    if (swap_hit) hit_add(OL_HIT_MEMBER + mi, x, y, rw, rh);
 }
 
 static void status_text(const NgLobby* L, char* out, size_t n) {
@@ -377,34 +350,36 @@ static void draw_lobby_cb(void* p) {
     int small_fs = clampi(h / 48, 9, 40);
     int head_fs = clampi(h / 26, 12, 80);
     int y = tb + m;
-    const char* kind = L->priv ? "PRIVATE ROOM" : "PUBLIC ROOM";
-    text_centered(kind, w / 2, y, head_fs, SLOT_LABEL);
+    char head[32];
+    if (L->games > 0) snprintf(head, sizeof head, "ROOM - GAME %d", L->games + 1);
+    else snprintf(head, sizeof head, "ROOM");
+    text_centered(head, w / 2, y, head_fs, SLOT_LABEL);
     y += head_fs + m / 4;
-    if (L->priv && L->code[0]) {
-        int code_fs = clampi(h / 11, 20, 220);
-        text_centered(L->code, w / 2, y, code_fs, ACCENT);
-        y += code_fs + m / 4;
-    }
     char rl[96];
     rules_line(rl, sizeof rl, L->target, L->bonus, L->partners);
-    if (L->priv && L->away_policy) strncat(rl, " - WAITS FOR ABSENT PLAYERS", sizeof rl - strlen(rl) - 1);
     text_centered(rl, w / 2, y, fit(rl, small_fs, rw), SLOT_LABEL);
-    y += small_fs + m;
+    y += small_fs + m / 3;
+
+    // The last match's result, until the next deal.
+    char res[96];
+    online_result_line(v->ng, res, sizeof res);
+    if (res[0]) {
+        int rfs = clampi(h / 36, 10, 60);
+        text_centered(res, w / 2, y, fit(res, rfs, rw), ACCENT);
+        y += rfs + m / 3;
+    }
+    y += m * 2 / 3;
 
     // Members.
     int row_h = clampi(h / 13, 30, 170), gap = m / 3;
     if (!L->partners) {
         for (int i = 0; i < MAX_PLAYERS; i++) {
-            draw_member(L, i, m, y, rw, row_h, false);
+            draw_member(L, i, m, y, rw, row_h);
             y += row_h + gap;
         }
     } else {
-        // Two teams side by side, two slots each. When both are full, a tap
-        // on someone across the table asks them to swap.
+        // Two teams side by side, two slots each.
         int cw = (rw - m / 2) / 2;
-        int team_n[2] = {0, 0};
-        for (int i = 0; i < MAX_PLAYERS; i++) if (L->used[i]) team_n[L->team[i]]++;
-        bool full = team_n[0] == 2 && team_n[1] == 2;
         for (int t = 0; t < 2; t++) {
             int cx = m + t * (cw + m / 2);
             text_centered(t ? "TEAM B" : "TEAM A", cx + cw / 2, y, small_fs, SLOT_LABEL);
@@ -412,8 +387,7 @@ static void draw_lobby_cb(void* p) {
             int shown = 0;
             for (int i = 0; i < MAX_PLAYERS && shown < 2; i++) {
                 if (!L->used[i] || L->team[i] != t) continue;
-                bool swap = full && t != L->team[L->me];
-                draw_member(L, i, cx, ry, cw, row_h, swap);
+                draw_member(L, i, cx, ry, cw, row_h);
                 ry += row_h + gap;
                 shown++;
             }
@@ -421,7 +395,7 @@ static void draw_lobby_cb(void* p) {
                 // An open slot on this team: draw it from an unused member index.
                 int free_i = -1;
                 for (int i = 0; i < MAX_PLAYERS; i++) if (!L->used[i]) { free_i = i; break; }
-                if (free_i >= 0) draw_member(L, free_i, cx, ry, cw, row_h, false);
+                if (free_i >= 0) draw_member(L, free_i, cx, ry, cw, row_h);
                 ry += row_h + gap;
             }
         }
@@ -436,62 +410,42 @@ static void draw_lobby_cb(void* p) {
     y += m / 2;
     text_centered(st, w / 2, y, fit(st, st_fs, rw), counting ? ACCENT : WHITE);
 
-    // Buttons from the bottom up: Leave and the small ones in pairs, the
+    // Buttons from the bottom up: Leave (and Switch Team) in a row, the
     // primary (Ready / Start without them) full width above them.
-    int ids[8];
+    int ids[4];
     int nb = online_lobby_buttons(v, ids);
     int focus = (v->sel >= 0 && v->sel < nb) ? ids[v->sel] : -1;
     int btn_h = clampi(h / 15, 26, 150);
     int big_h = btn_h + btn_h / 4;
     int bottom = h - m;   // the bottom edge of the next row up
-    if (L->swap_from < 0) {
-        int small[8], ns = 0, big[2], nbig = 0;
-        for (int i = 0; i < nb; i++) {
-            if (ids[i] == OLB_READY || ids[i] == OLB_FORCE) big[nbig++] = ids[i];
-            else small[ns++] = ids[i];
-        }
-        int half = (rw - m / 2) / 2;
-        for (int i = ns - 1; i >= 0; i -= 2) {
-            int y0 = bottom - btn_h;
-            if (i - 1 >= 0) {
-                draw_button(OL_HIT_BUTTON + small[i - 1], m, y0, half, btn_h,
-                            button_label(small[i - 1], L), false, focus == small[i - 1]);
-                draw_button(OL_HIT_BUTTON + small[i], m + half + m / 2, y0, half, btn_h,
-                            button_label(small[i], L), false, focus == small[i]);
-            } else {
-                draw_button(OL_HIT_BUTTON + small[i], m, y0, rw, btn_h,
-                            button_label(small[i], L), false, focus == small[i]);
-            }
-            bottom = y0 - m / 2;
-        }
-        for (int i = nbig - 1; i >= 0; i--) {
-            int y0 = bottom - big_h;
-            bool primary = big[i] == OLB_FORCE || !L->ready[L->me];
-            draw_button(OL_HIT_BUTTON + big[i], m, y0, rw, big_h,
-                        button_label(big[i], L), primary, focus == big[i]);
-            bottom = y0 - m / 2;
-        }
+    int small[4], ns = 0, big[2], nbig = 0;
+    for (int i = 0; i < nb; i++) {
+        if (ids[i] == OLB_READY || ids[i] == OLB_FORCE) big[nbig++] = ids[i];
+        else small[ns++] = ids[i];
+    }
+    int half = (rw - m / 2) / 2;
+    int y0 = bottom - btn_h;
+    if (ns == 2) {
+        draw_button(OL_HIT_BUTTON + small[0], m, y0, half, btn_h,
+                    button_label(small[0], L), false, focus == small[0]);
+        draw_button(OL_HIT_BUTTON + small[1], m + half + m / 2, y0, half, btn_h,
+                    button_label(small[1], L), false, focus == small[1]);
+    } else if (ns == 1) {
+        draw_button(OL_HIT_BUTTON + small[0], m, y0, rw, btn_h,
+                    button_label(small[0], L), false, focus == small[0]);
+    }
+    bottom = y0 - m / 2;
+    for (int i = nbig - 1; i >= 0; i--) {
+        y0 = bottom - big_h;
+        bool primary = big[i] == OLB_FORCE || !L->ready[L->me];
+        draw_button(OL_HIT_BUTTON + big[i], m, y0, rw, big_h,
+                    button_label(big[i], L), primary, focus == big[i]);
+        bottom = y0 - m / 2;
     }
 
     if (v->notice && v->notice[0]) {
         text_centered(v->notice, w / 2, bottom - small_fs - m / 2,
                       fit(v->notice, small_fs, rw), ACCENT);
-    }
-
-    // Partners: someone asked to swap with us. A prompt over everything.
-    if (L->swap_from >= 0) {
-        int ph = m * 3 + small_fs * 2 + btn_h;
-        int py = h / 2 - ph / 2;
-        gfx_rect(0, 0, w, h, (Color){ 0, 0, 0, 140 });
-        rect_rounded_px(m, py, rw, ph, m, PANEL_SEL);
-        char q[64];
-        snprintf(q, sizeof q, "%s WANTS TO SWAP TEAMS", L->names[L->swap_from]);
-        text_centered(q, w / 2, py + m, fit(q, small_fs * 3 / 2, rw - 2 * m), WHITE);
-        int half = (rw - 3 * m) / 2;
-        draw_button(OL_HIT_BUTTON + OLB_ACCEPT, m * 2, py + ph - m - btn_h, half, btn_h,
-                    "ACCEPT", true, focus == OLB_ACCEPT);
-        draw_button(OL_HIT_BUTTON + OLB_DECLINE, m * 2 + half + m, py + ph - m - btn_h, half,
-                    btn_h, "DECLINE", false, focus == OLB_DECLINE);
     }
 }
 
