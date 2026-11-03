@@ -2,15 +2,19 @@
 // port and drives real netgame clients — each an independent session playing
 // with the actual AI over its own redacted view — through every room flow:
 //
-//   1. Public rooms, 2/3/4 players: browse the list, join, ready, play a match
-//      to the end, and land back in the same waiting room. Every client agrees
-//      on the winner and sees every other client's name.
-//   2. A private room (joined by code) plays two matches back to back.
-//   3. A Partners room: teams, a consented swap, a match.
+//   1. Rooms of 2/3/4 players: browse the list, join, ready, play a match to
+//      the end, and land back in the same waiting room with the result. Every
+//      client agrees on the winner and sees every other client's name.
+//   2. The same room, three matches back to back, with a player leaving and
+//      another arriving between games.
+//   3. A Partners room: teams, a switch that trades two players, a match.
 //   4. A player steps away mid-match, the others hand the seat to the AI,
 //      and the player comes back.
-//   5. The daemon restarts mid-match (snapshot on SIGTERM, reload at boot) and
-//      every client rejoins its seat by key and finishes the match.
+//   5. A player is away when the match ends: they land in the waiting room
+//      with everyone else.
+//   6. The daemon restarts mid-match (snapshot on SIGTERM, reload at boot) and
+//      every client rejoins its seat by key and finishes the match; then it
+//      restarts again while the room waits between games.
 //
 // Not part of `make test` (forks a process, binds a port). Run with
 // `make net-multi`; it gates the server deploy. Non-zero exit = failure.
@@ -133,6 +137,20 @@ static int lobby_count(const NetGame* ng) {
     return k;
 }
 
+// Bot `i` finds room `id` in the list and joins it.
+static void join_via_list(int n, int i, long id) {
+    netgame_list(&s_bots[i].ng);
+    bool seen = false;
+    for (int s = 0; s < 3000 && !seen; s++) {
+        pump(n);
+        for (int k = 0; k < s_bots[i].ng.room_count; k++) seen |= s_bots[i].ng.rooms[k].id == id;
+    }
+    CHECK(seen);
+    netgame_join_room(&s_bots[i].ng, id);
+    WAIT(n, s_bots[i].ng.state == NG_LOBBY, 3000);
+    CHECK(s_bots[i].ng.state == NG_LOBBY);
+}
+
 // Everyone readies; the deal follows the countdown.
 static void ready_and_start(int n) {
     for (int i = 0; i < n; i++) netgame_ready(&s_bots[i].ng, true);
@@ -140,14 +158,14 @@ static void ready_and_start(int n) {
     CHECK(all_state(n, NG_PLAYING));
 }
 
-// Play until every bot is back in the waiting room with the result pending.
+// Play until every present bot is back in the waiting room with the result.
 static void play_to_lobby(int n) {
     bool back = false;
     for (int s = 0; s < 150000 && !back && !any_error(n); s++) {
         pump(n);
         back = true;
         for (int i = 0; i < n; i++) {
-            if (s_bots[i].ng.state != NG_LOBBY || !s_bots[i].ng.result_pending) back = false;
+            if (s_bots[i].ng.state != NG_LOBBY || !s_bots[i].ng.have_result) back = false;
         }
     }
     CHECK(back);
@@ -155,47 +173,48 @@ static void play_to_lobby(int n) {
     for (int i = 0; i < n; i++) {
         CHECK(s_bots[i].ng.game.phase == PHASE_MATCH_OVER);
         CHECK(s_bots[i].ng.game.match_winner == mw);   // all agree on the winner
+        CHECK(!s_bots[i].ng.have_game);                // and are in the waiting room
     }
     CHECK(mw != NO_WINNER);
+    // The winner's total is strictly the top total on every client (a tie
+    // never ends a match), and it reached the target. Under Partners the
+    // winner is a pair and the totals are pair sums.
+    for (int i = 0; i < n; i++) {
+        const Game* g = &s_bots[i].ng.game;
+        int np = g->rules.player_count;
+        if (g->rules.partners) {
+            int win = g->players[mw].score + g->players[mw + 2].score;
+            int lose = g->players[1 - mw].score + g->players[3 - mw].score;
+            CHECK(win > lose && win >= g->rules.target_score);
+        } else {
+            for (int p = 0; p < np; p++) {
+                if (p != mw) CHECK(g->players[mw].score > g->players[p].score);
+            }
+            CHECK(g->players[mw].score >= g->rules.target_score);
+        }
+    }
     printf("  match over, winner seat %d; everyone back in the waiting room\n", mw);
-    for (int i = 0; i < n; i++) netgame_dismiss_result(&s_bots[i].ng);
 }
 
 static void close_all(int n) {
     for (int i = 0; i < n; i++) netgame_close(&s_bots[i].ng);
 }
 
-// --- 1. Public rooms ------------------------------------------------------------
-static void scenario_public(int n) {
-    printf("== public room, %d players ==\n", n);
+// --- 1. Rooms of 2/3/4 ------------------------------------------------------------
+static void scenario_room(int n) {
+    printf("== room, %d players ==\n", n);
     for (int i = 0; i < n; i++) bot_start(i, NULL);
     WAIT(n, all_state(n, NG_IDLE), 3000);
     CHECK(all_state(n, NG_IDLE));
 
     Rules r = rules_default();
     r.target_score = 50;   // one player going out can decide it
-    netgame_create(&s_bots[0].ng, false, &r, false);
+    netgame_create(&s_bots[0].ng, &r);
     WAIT(n, s_bots[0].ng.state == NG_LOBBY && s_bots[0].ng.have_lobby, 3000);
     long id = s_bots[0].ng.room_id;
-    CHECK(s_bots[0].ng.code[0] == '\0');   // public rooms have no code
+    CHECK(s_bots[0].ng.lobby.target == 50);
 
-    // The others find it in the room list and join from there.
-    for (int i = 1; i < n; i++) netgame_list(&s_bots[i].ng, 0);
-    bool seen = false;
-    for (int s = 0; s < 3000 && !seen; s++) {
-        pump(n);
-        seen = true;
-        for (int i = 1; i < n; i++) {
-            bool has = false;
-            for (int k = 0; k < s_bots[i].ng.room_count; k++) has |= s_bots[i].ng.rooms[k].id == id;
-            if (!has) seen = false;
-        }
-    }
-    CHECK(seen);
-    for (int i = 1; i < n; i++) {
-        netgame_join_room(&s_bots[i].ng, id);
-        WAIT(n, s_bots[i].ng.state == NG_LOBBY, 3000);
-    }
+    for (int i = 1; i < n; i++) join_via_list(n, i, id);
     WAIT(n, all_in_lobby_of(n, id) && lobby_count(&s_bots[0].ng) == n, 3000);
     CHECK(lobby_count(&s_bots[0].ng) == n);
     for (int i = 0; i < n; i++) {
@@ -212,72 +231,94 @@ static void scenario_public(int n) {
         }
     }
     play_to_lobby(n);
+    CHECK(s_bots[0].ng.lobby.games == 1);
     close_all(n);
 }
 
-// --- 2. Private room, two matches ------------------------------------------------
-static void scenario_private_rematch(void) {
-    printf("== private room, two matches ==\n");
-    int n = 2;
+// --- 2. The same room, three matches, members coming and going -------------------
+static void scenario_rematch(void) {
+    printf("== one room, three matches ==\n");
+    int n = 3;
     for (int i = 0; i < n; i++) bot_start(i, NULL);
     WAIT(n, all_state(n, NG_IDLE), 3000);
     Rules r = rules_default();
     r.target_score = 50;
-    netgame_create(&s_bots[0].ng, true, &r, false);
+    netgame_create(&s_bots[0].ng, &r);
     WAIT(n, s_bots[0].ng.have_lobby, 3000);
-    char code[NG_CODE];
-    snprintf(code, sizeof code, "%s", s_bots[0].ng.code);
-    CHECK(strlen(code) == 4);
-    CHECK(s_bots[0].ng.owner[0] != '\0');
-    printf("  room %s\n", code);
-    netgame_peek(&s_bots[1].ng, code);
-    WAIT(n, s_bots[1].ng.peek.known, 2000);
-    CHECK(s_bots[1].ng.peek.ok && s_bots[1].ng.peek.n == 1);
-    netgame_join_code(&s_bots[1].ng, code);
-    WAIT(n, all_in_lobby_of(n, s_bots[0].ng.room_id) && lobby_count(&s_bots[1].ng) == 2, 3000);
-    CHECK(lobby_count(&s_bots[1].ng) == 2);
+    long id = s_bots[0].ng.room_id;
+    join_via_list(n, 1, id);
+    WAIT(n, lobby_count(&s_bots[0].ng) == 2, 3000);
+    char key1[NG_KEY];
+    snprintf(key1, sizeof key1, "%s", s_bots[1].ng.key);
 
-    ready_and_start(n);
-    play_to_lobby(n);
-    ready_and_start(n);     // same table, no rejoining
-    play_to_lobby(n);
+    // Game one: two players.
+    ready_and_start(2);
+    play_to_lobby(2);
+    CHECK(all_in_lobby_of(2, id));
+    CHECK(s_bots[1].ng.lobby.games == 1);
+    CHECK(strcmp(s_bots[1].ng.key, key1) == 0);        // the seat key carries over
+
+    // Game two: a third player finds the room (it is listed again) and joins.
+    join_via_list(n, 2, id);
+    WAIT(n, lobby_count(&s_bots[0].ng) == 3, 3000);
+    ready_and_start(3);
+    CHECK(s_bots[2].ng.game.rules.player_count == 3);
+    for (int i = 0; i < 3; i++) CHECK(s_bots[i].ng.game.players[s_bots[i].ng.my_seat].score == 0);
+    play_to_lobby(3);
+    CHECK(s_bots[2].ng.lobby.games == 2);
+    printf("  three games in, nobody rejoined, keys intact\n");
+
+    // Game three: P1 leaves between games; the other two play on.
+    netgame_leave(&s_bots[1].ng);
+    WAIT(n, lobby_count(&s_bots[0].ng) == 2 && s_bots[1].ng.state == NG_IDLE, 3000);
+    CHECK(lobby_count(&s_bots[0].ng) == 2);
+    Bot* pair[2] = {&s_bots[0], &s_bots[2]};
+    for (int i = 0; i < 2; i++) netgame_ready(&pair[i]->ng, true);
+    bool playing = false;
+    for (int s = 0; s < 4000 && !playing; s++) {
+        pump(n);
+        playing = pair[0]->ng.state == NG_PLAYING && pair[1]->ng.state == NG_PLAYING;
+    }
+    CHECK(playing);
+    bool back = false;
+    for (int s = 0; s < 150000 && !back && !any_error(n); s++) {
+        pump(n);
+        back = pair[0]->ng.have_result && pair[1]->ng.have_result;
+    }
+    CHECK(back);
+    CHECK(pair[0]->ng.lobby.games == 3);
     close_all(n);
 }
 
 // --- 3. Partners ------------------------------------------------------------------
 static void scenario_partners(void) {
-    printf("== partners room with a swap ==\n");
+    printf("== partners room with a team switch ==\n");
     int n = 4;
     for (int i = 0; i < n; i++) bot_start(i, NULL);
     WAIT(n, all_state(n, NG_IDLE), 3000);
     Rules r = rules_default();
     r.target_score = 50;
     r.partners = true;
-    netgame_create(&s_bots[0].ng, true, &r, false);
+    netgame_create(&s_bots[0].ng, &r);
     WAIT(n, s_bots[0].ng.have_lobby, 3000);
-    char code[NG_CODE];
-    snprintf(code, sizeof code, "%s", s_bots[0].ng.code);
-    for (int i = 1; i < n; i++) {
-        netgame_join_code(&s_bots[i].ng, code);
-        WAIT(n, s_bots[i].ng.state == NG_LOBBY, 3000);
-    }
+    long id = s_bots[0].ng.room_id;
+    for (int i = 1; i < n; i++) join_via_list(n, i, id);
     WAIT(n, lobby_count(&s_bots[0].ng) == 4, 3000);
     NgLobby* L = &s_bots[0].ng.lobby;
     CHECK(L->team[0] == 0 && L->team[1] == 1 && L->team[2] == 0 && L->team[3] == 1);
 
-    // P0 (team A) asks P1 (team B) to swap; P1 accepts.
-    netgame_swap(&s_bots[0].ng, 1);
-    WAIT(n, s_bots[1].ng.lobby.swap_from == 0, 2000);
-    CHECK(s_bots[1].ng.lobby.swap_from == 0);
-    netgame_swap_answer(&s_bots[1].ng, 0, true);
+    // P0 (team A) switches: both teams are full, so P0 trades with team B's
+    // most recent member, P3.
+    netgame_team(&s_bots[0].ng);
     WAIT(n, s_bots[0].ng.lobby.team[0] == 1, 2000);
-    CHECK(s_bots[0].ng.lobby.team[0] == 1 && s_bots[0].ng.lobby.team[1] == 0);
-    printf("  swap accepted: teams now P1+P2 vs P0+P3\n");
+    CHECK(s_bots[0].ng.lobby.team[0] == 1 && s_bots[0].ng.lobby.team[3] == 0);
+    CHECK(s_bots[0].ng.lobby.team[1] == 1 && s_bots[0].ng.lobby.team[2] == 0);
+    printf("  switch traded P0 and P3: teams now P2+P3 vs P0+P1\n");
 
     ready_and_start(n);
     CHECK(s_bots[0].ng.game.rules.partners);
-    // Partners sit opposite: P1 and P2 two seats apart.
-    int d = (s_bots[1].ng.my_seat - s_bots[2].ng.my_seat + 4) % 4;
+    // Partners sit opposite: P0 and P1 two seats apart.
+    int d = (s_bots[0].ng.my_seat - s_bots[1].ng.my_seat + 4) % 4;
     CHECK(d == 2);
     play_to_lobby(n);
     close_all(n);
@@ -291,9 +332,9 @@ static void scenario_step_away(void) {
     WAIT(n, all_state(n, NG_IDLE), 3000);
     Rules r = rules_default();
     r.target_score = 500;   // long enough to step away and back mid-match
-    netgame_create(&s_bots[0].ng, false, &r, false);
+    netgame_create(&s_bots[0].ng, &r);
     WAIT(n, s_bots[0].ng.have_lobby, 3000);
-    netgame_join_room(&s_bots[1].ng, s_bots[0].ng.room_id);
+    join_via_list(n, 1, s_bots[0].ng.room_id);
     WAIT(n, all_in_lobby_of(n, s_bots[0].ng.room_id) && lobby_count(&s_bots[0].ng) == 2, 3000);
     ready_and_start(n);
 
@@ -305,7 +346,7 @@ static void scenario_step_away(void) {
     CHECK(s_bots[0].ng.ctl[away_seat] == 1);
     // The table waits at P1's turn; P0 hands the seat to the AI.
     WAIT(n, s_bots[0].ng.wait_seat == away_seat, 20000);
-    CHECK(s_bots[0].ng.wait_seat == away_seat && s_bots[0].ng.wait_timer);
+    CHECK(s_bots[0].ng.wait_seat == away_seat && s_bots[0].ng.wait_ms > 0);
     int round = s_bots[0].ng.game.round_no;
     netgame_letai(&s_bots[0].ng, away_seat);
     WAIT(n, s_bots[0].ng.wait_seat == -1 && s_bots[0].ng.game.turn != away_seat, 4000);
@@ -323,22 +364,53 @@ static void scenario_step_away(void) {
     close_all(n);
 }
 
-// --- 5. Daemon restart mid-match ------------------------------------------------------
+// --- 5. Away when the match ends ----------------------------------------------------
+static void scenario_away_at_end(void) {
+    printf("== away when the match ends ==\n");
+    int n = 2;
+    for (int i = 0; i < n; i++) bot_start(i, NULL);
+    WAIT(n, all_state(n, NG_IDLE), 3000);
+    Rules r = rules_default();
+    r.target_score = 50;
+    netgame_create(&s_bots[0].ng, &r);
+    WAIT(n, s_bots[0].ng.have_lobby, 3000);
+    long id = s_bots[0].ng.room_id;
+    join_via_list(n, 1, id);
+    WAIT(n, lobby_count(&s_bots[0].ng) == 2, 3000);
+    ready_and_start(n);
+
+    // P1 steps away for good; the AI plays its seat and P0 lets it.
+    s_bots[1].autoplay = false;
+    netgame_leave(&s_bots[1].ng);
+    bool done = false;
+    for (int s = 0; s < 150000 && !done && !any_error(n); s++) {
+        pump(n);
+        if (s_bots[0].ng.wait_seat >= 0) netgame_letai(&s_bots[0].ng, s_bots[0].ng.wait_seat);
+        done = s_bots[0].ng.have_result && s_bots[0].ng.state == NG_LOBBY;
+    }
+    CHECK(done);
+    // P1 is in the same waiting room, with the result, not ready.
+    WAIT(n, s_bots[1].ng.state == NG_LOBBY && s_bots[1].ng.have_lobby, 3000);
+    CHECK(all_in_lobby_of(n, id));
+    CHECK(s_bots[1].ng.have_result);
+    CHECK(!s_bots[1].ng.lobby.ready[s_bots[1].ng.lobby.me]);
+    CHECK(lobby_count(&s_bots[0].ng) == 2);
+    printf("  P1 landed in the waiting room with the result\n");
+    close_all(n);
+}
+
+// --- 6. Daemon restarts -------------------------------------------------------------
 static void scenario_restart(void) {
-    printf("== daemon restart mid-match ==\n");
+    printf("== daemon restart mid-match, then between games ==\n");
     int n = 3;
     for (int i = 0; i < n; i++) bot_start(i, NULL);
     WAIT(n, all_state(n, NG_IDLE), 3000);
     Rules r = rules_default();
     r.target_score = 50;
-    netgame_create(&s_bots[0].ng, true, &r, false);
+    netgame_create(&s_bots[0].ng, &r);
     WAIT(n, s_bots[0].ng.have_lobby, 3000);
-    char code[NG_CODE];
-    snprintf(code, sizeof code, "%s", s_bots[0].ng.code);
-    for (int i = 1; i < n; i++) {
-        netgame_join_code(&s_bots[i].ng, code);
-        WAIT(n, s_bots[i].ng.state == NG_LOBBY, 3000);
-    }
+    long id = s_bots[0].ng.room_id;
+    for (int i = 1; i < n; i++) join_via_list(n, i, id);
     WAIT(n, lobby_count(&s_bots[0].ng) == n, 3000);
     ready_and_start(n);
     for (int s = 0; s < 200; s++) pump(n);   // a few moves in
@@ -353,6 +425,18 @@ static void scenario_restart(void) {
     CHECK(s_bots[0].ng.game.stock_count <= stock_before + 60);
     printf("  all %d rejoined after the restart\n", n);
     play_to_lobby(n);
+
+    // Between games: the occupied waiting room survives a restart too.
+    stop_daemon();
+    for (int s = 0; s < 50; s++) pump(n);
+    for (int i = 0; i < n; i++) CHECK(s_bots[i].ng.state == NG_DISCONNECTED);
+    start_daemon();
+    WAIT(n, all_in_lobby_of(n, id) && lobby_count(&s_bots[0].ng) == n, 6000);
+    CHECK(all_in_lobby_of(n, id));
+    CHECK(s_bots[0].ng.lobby.games == 1);
+    printf("  the waiting room came back with everyone in it\n");
+    ready_and_start(n);
+    play_to_lobby(n);
     close_all(n);
 }
 
@@ -365,10 +449,11 @@ int main(void) {
     mkdir(s_datadir, 0700);
     start_daemon();
 
-    for (int n = 2; n <= 4; n++) scenario_public(n);
-    scenario_private_rematch();
+    for (int n = 2; n <= 4; n++) scenario_room(n);
+    scenario_rematch();
     scenario_partners();
     scenario_step_away();
+    scenario_away_at_end();
     scenario_restart();
 
     stop_daemon();
@@ -378,7 +463,7 @@ int main(void) {
     rmdir(s_datadir);
 
     if (failures == 0) {
-        printf("OK: public 2/3/4, private rematch, partners, step-away, restart\n");
+        printf("OK: rooms 2/3/4, three-game room, partners, step-away, away at end, restarts\n");
         return 0;
     }
     printf("FAILED: %d check(s)\n", failures);

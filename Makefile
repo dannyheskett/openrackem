@@ -19,7 +19,7 @@ SRC := src/main.c src/rules.c src/game.c src/ai.c src/tick.c src/input.c \
        src/safe_area.c src/menu.c src/present.c src/window.c \
        src/sound.c src/audio_raylib.c \
        src/netgame.c src/net_ws.c src/net_posix.c src/net_stub.c src/net_web.c \
-       src/net_win.c src/prefs.c src/softkbd.c src/online_ui.c src/share.c \
+       src/net_win.c src/prefs.c src/softkbd.c src/online_ui.c \
        src/recorder.c src/encode_h264.c src/encode_mux.c
 
 # Shared standard/warning flags and vendored-header include paths.
@@ -440,7 +440,7 @@ IOS_C_SRC      := src/rules.c src/game.c src/ai.c src/tick.c src/main.c \
                   src/render.c src/render_portrait.c \
                   src/input.c src/sound.c src/recorder.c src/safe_area.c \
                   src/menu.c src/present.c src/window.c \
-                  src/netgame.c src/prefs.c src/softkbd.c src/online_ui.c src/share.c
+                  src/netgame.c src/prefs.c src/softkbd.c src/online_ui.c
 IOS_MM_SRC     := ios/ios_main.mm ios/gfx_metal.mm ios/plat_ios.mm ios/audio_ios.mm
 # The online client (net_apple.mm, Network.framework) is Obj-C++ compiled
 # WITHOUT ARC (it hand-retains nw_/dispatch objects held in a C struct), so it
@@ -597,7 +597,7 @@ $(TEST_AI_BIN): tests/test_ai.c $(wildcard src/*.c src/*.h) | $(OBJ_DIR)
 $(TEST_INPUT_BIN): tests/test_input.c $(wildcard src/*.c src/*.h) | $(OBJ_DIR)
 	gcc $(CFLAGS_COMMON) -O0 -g -DPLATFORM_IOS tests/test_input.c -o $(TEST_INPUT_BIN)
 
-# test_server — the daemon core (rooms, tokens, timers, matchmaking, redacted
+# test_server — the daemon core (rooms, keys, timers, the room list, redacted
 # broadcast) plus the ws/wire codecs, driven socket-free with injected time.
 $(TEST_SERVER_BIN): tests/test_server.c $(wildcard src/*.c src/*.h src-server/*.c src-server/*.h) | $(OBJ_DIR)
 	gcc $(CFLAGS_COMMON) -Isrc-server -O0 -g tests/test_server.c -o $(TEST_SERVER_BIN)
@@ -652,6 +652,22 @@ store-shots-ios: $(STORE_SHOTS_BIN)
 	@# The App Store rejects screenshots carrying an alpha channel.
 	python3 -c "import glob;from PIL import Image;[Image.open(f).convert('RGB').save(f) for f in glob.glob('$(IOS_SHOT_DIR)/*.png')]"
 	@echo "[ios] store shots -> $(IOS_SHOT_DIR)" 
+
+# The site demo: scripts/gen_demo.c plays a scripted game at 1280x720 and
+# pipes every frame to ffmpeg (60 s, 60 fps, fade through black at the loop
+# point, no audio), then writes the poster from the first table frame.
+#   make demo   -> build/demo/openrackem-demo.mp4 + openrackem-demo-poster.webp
+DEMO_BIN := build/gen_demo
+
+$(DEMO_BIN): scripts/gen_demo.c $(wildcard src/*.c src/*.h) | $(OBJ_DIR)
+	gcc $(CFLAGS_COMMON) -O2 -DPLATFORM_WEB -DOR_NET_STUB -I$(RAYLIB)/include \
+	    scripts/gen_demo.c $(SHOTS_SRC) -o $(DEMO_BIN) $(LDFLAGS)
+
+demo: $(DEMO_BIN)
+	mkdir -p build/demo
+	xvfb-run -a -s "-screen 0 1400x800x24" ./$(DEMO_BIN) build/demo
+	python3 -c "from PIL import Image; Image.open('build/demo/poster.png').convert('RGB').save('build/demo/openrackem-demo-poster.webp', quality=85)"
+	@echo "[demo] build/demo/openrackem-demo.mp4 + openrackem-demo-poster.webp"
 
 $(SHOTS_BIN): tests/vis_shots.c $(wildcard src/*.c src/*.h) | $(OBJ_DIR)
 	gcc $(CFLAGS_COMMON) -O2 -DPLATFORM_WEB -DOR_NET_STUB -I$(RAYLIB)/include \
@@ -830,6 +846,6 @@ clean:
 # Pull in auto-generated header dependencies (ignored if not yet present).
 -include $(OBJ:.o=.d) $(REL_OBJ:.o=.d) $(WIN64_OBJ:.o=.d) $(WIN32_OBJ:.o=.d) $(MAC_OBJ:.o=.d)
 
-.PHONY: all run release run-release windows mac web web-serve test ai-bench shots store-shots store-shots-ios server server-run net-e2e net-multi net-live mac-net-test win-net-build win-net-test android-net-build clean \
+.PHONY: all run release run-release windows mac web web-serve test ai-bench shots store-shots store-shots-ios demo server server-run net-e2e net-multi net-live mac-net-test win-net-build win-net-test android-net-build clean \
         android android-play ios ios-sim \
         dist dist-linux dist-windows dist-mac dist-web dist-android dist-android-play dist-ios

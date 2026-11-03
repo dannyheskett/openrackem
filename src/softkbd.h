@@ -7,8 +7,8 @@
 extern "C" { // ios_main.mm pushes events from Objective-C++
 #endif
 
-// The platform's on-screen keyboard, for the text-entry screens (player name,
-// room code) on touch devices: Android (an input-connection view in
+// The platform's on-screen keyboard, for the text-entry screen (the player
+// name) on touch devices: Android (an input-connection view in
 // OpenrackemActivity), iOS (UIKeyInput on the Metal view) and mobile browsers
 // (a hidden <input> in web/shell.html). Typed characters, backspace and the
 // keyboard's Done key come back through softkbd_poll() and are merged into the

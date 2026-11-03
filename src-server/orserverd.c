@@ -10,7 +10,7 @@
 // default 8080) and trusts the Fly-Client-IP header for rate limiting.
 //
 // Persistence: with $OR_DATA_DIR set (the Fly volume, /data), the core's
-// snapshot — private rooms and every live match — is loaded at boot and
+// snapshot — every live match and occupied waiting room — is loaded at boot and
 // rewritten (tmp + rename) at most every SNAP_EVERY_MS while anything changed,
 // and once more on SIGTERM/SIGINT, so a deploy or restart doesn't end games.
 #define _POSIX_C_SOURCE 200809L
@@ -34,7 +34,7 @@
 #include <unistd.h>
 
 #define IN_CAP   4096     // handshake headers / one batch of client frames
-#define OUT_CAP  32768    // a room list plus a burst of states; overflow = close
+#define OUT_CAP  32768    // the room list plus a burst of states; overflow = close
 #define TICK_MS  250      // core tick cadence (well under every core deadline)
 #define SNAP_EVERY_MS 5000  // snapshot spacing while the core is dirty
 

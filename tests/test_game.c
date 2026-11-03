@@ -515,7 +515,7 @@ static void test_match(void) {
     end_round(g, 1);
     CHECK(g->match_winner == 1);
 
-    // A dead tie at the target goes to the seat that went out.
+    // A dead tie at the target decides nothing: another round is played.
     g = fresh(3, 34);
     g->players[0].score = 450;             // +50 -> 500
     g->players[1].score = 425;             // +75 -> 500
@@ -523,7 +523,36 @@ static void test_match(void) {
     memcpy(g->players[1].rack.slots, ordered, RACK_SLOTS);
     memcpy(g->players[2].rack.slots, weak, RACK_SLOTS);
     end_round(g, 1);
-    CHECK(g->match_winner == 1);
+    CHECK(g->match_winner == NO_WINNER);
+    CHECK(g->players[0].score == 500 && g->players[1].score == 500);
+    game_next_round(g);
+    CHECK(g->phase == PHASE_DEAL);         // the match goes on
+    CHECK(g->round_no == 2);
+
+    // ...and a tie below the top does not block the clear leader.
+    g = fresh(3, 38);
+    g->players[0].score = 450;             // +50 -> 500
+    g->players[1].score = 450;             // +50 -> 500
+    g->players[2].score = 440;             // +75 -> 515
+    memcpy(g->players[0].rack.slots, ordered, RACK_SLOTS);
+    memcpy(g->players[1].rack.slots, ordered, RACK_SLOTS);
+    memcpy(g->players[2].rack.slots, ordered, RACK_SLOTS);
+    end_round(g, 2);
+    CHECK(g->match_winner == 2);
+
+    // Partners: tied pairs at the target play on too.
+    Rules tr = test_rules(4, 39);
+    tr.partners = true;
+    g = game_create(&tr);
+    skip_deal(g);
+    g->players[0].score = 250; g->players[2].score = 175;   // pair 0: 425 + 75 = 500
+    g->players[1].score = 250; g->players[3].score = 200;   // pair 1: 450 + 50 = 500
+    memcpy(g->players[0].rack.slots, ordered, RACK_SLOTS);
+    memcpy(g->players[1].rack.slots, ordered, RACK_SLOTS);
+    memcpy(g->players[2].rack.slots, weak, RACK_SLOTS);
+    memcpy(g->players[3].rack.slots, weak, RACK_SLOTS);
+    end_round(g, 0);
+    CHECK(g->match_winner == NO_WINNER);
 
     // Partners: pair scores sum after each round; the first pair to 500 wins.
     Rules pr = test_rules(4, 35);

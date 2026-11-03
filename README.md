@@ -8,7 +8,7 @@ First to 500 wins the match.
 An original implementation of the classic rack-sorting card game — full
 official rules and scoring, including the mandatory two-player run rule and
 the optional Bonus and Partners variants — with AI opponents in three
-strengths. Not affiliated with or endorsed by any other game or its rights
+strengths and online rooms for 2–4 people. Not affiliated with or endorsed by any other game or its rights
 holders.
 
 Targets: **Linux**, **Windows** (x64/x86), **macOS** (universal), **Web**
@@ -104,36 +104,40 @@ assembled `.ipa`, no Xcode project). CI builds all of these on every PR; see
 
 ## Playing online
 
-**Play Online** needs a player name (it asks for one first). It opens a room
-list:
+**Play Online** needs a player name (it asks for one first). It opens the
+room list:
 
-- **Public rooms** are listed by who's in them (no code). Pick one to step
-  into its waiting room; Leave puts you straight back on the list. Join Best
-  Room picks the one closest to starting; the list can be filtered by Play To.
-- **Private rooms** are unlisted and joined by a 4-character code, a Share
-  link, or the saved room at the top of the list. They last 30 days after
-  their last game, so a group keeps the same code.
+- **Rooms** are listed by who's in them, with a ready dot per player and the
+  room's rules (Play To, Bonus, Partners). Tap one that isn't full to step into
+  its waiting room; Leave puts you straight back on the list. **New Room**
+  makes a room with the rules from Options; the rules are fixed for the room's
+  life.
 - **Waiting room:** everyone's name with a ready dot (filled = ready). When
   everyone present (2–4 players) is ready, the game starts. Partners needs 4
-  in two teams of two; players pick teams, and a swap needs the other
-  player's OK. After a match everyone returns to the same waiting room.
+  in two teams of two; Switch Team moves you across, trading places with
+  someone if the other team is full. If two players are ready and someone
+  isn't for a minute, the ready players can Start Without Them.
+- **After a match** everyone lands back in the same waiting room, with the
+  result on show, ready to go again. The room is listed while it waits and
+  lives as long as anyone is in it. A tie at the target plays another round.
 - **Leaving mid-game** keeps your seat: an AI stands in (shown with an "AI"
   tag) and **Return to Game** brings you back. When it's an absent player's
   turn the table waits 30 s, and anyone can tap **Let AI play**. Forfeit (from
-  the in-game menu) gives the seat up.
+  the in-game menu) gives the seat up. A dropped connection in the waiting
+  room keeps your seat for a couple of minutes.
 
 ## Multiplayer server
 
 `make server` builds `orserverd`, the authoritative multiplayer daemon
-(Linux): public and private rooms, waiting rooms with ready-up, a live room
-list, member keys with reconnect, turn clocks and the leave policy, and
-per-seat redacted state over WebSocket. Single-threaded with fixed pools on
-one tiny fly.io machine (`fly.toml` / `Dockerfile.server`). With
-`OR_DATA_DIR` set it snapshots private rooms and live matches to disk, so a
-restart or deploy doesn't end games. Point a client at a local daemon with
-`OPENRACKEM_SERVER` / `OPENRACKEM_PORT` (default
-`openrackem-rooms.fly.dev:443`). `make net-multi` plays every room flow over
-loopback against the real daemon. See `docs/PLAN-MULTIPLAYER.md`.
+(Linux): rooms, waiting rooms with ready-up, the live room list, member keys
+with reconnect, turn clocks and the leave policy, and per-seat redacted state
+over WebSocket. Single-threaded with fixed pools on one tiny fly.io machine
+(`fly.toml` / `Dockerfile.server`). With `OR_DATA_DIR` set it snapshots live
+matches and occupied waiting rooms to disk, so a restart or deploy doesn't end
+games. Point a client at a local daemon with `OPENRACKEM_SERVER` /
+`OPENRACKEM_PORT` (default `openrackem-rooms.fly.dev:443`). `make net-multi`
+plays every room flow over loopback against the real daemon. See
+`docs/PLAN-MULTIPLAYER.md`.
 
 ## Build and release
 

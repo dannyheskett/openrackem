@@ -187,21 +187,6 @@ extern "C" void plat_ios_set_keyboard(bool visible) {
     [s_view setKeyboardVisible:visible ? YES : NO];
 }
 
-// The system share sheet with a private room's invite line (src/share.c).
-// Called on the main thread (the CADisplayLink frame), as UIKit requires.
-extern "C" void plat_ios_share(const char* text) {
-    UIViewController* root = s_view.window.rootViewController;
-    if (!root || !text) return;
-    NSString* str = [NSString stringWithUTF8String:text];
-    UIActivityViewController* sheet =
-        [[UIActivityViewController alloc] initWithActivityItems:@[str] applicationActivities:nil];
-    // iPad presents the sheet as a popover, which needs an anchor.
-    sheet.popoverPresentationController.sourceView = root.view;
-    sheet.popoverPresentationController.sourceRect =
-        CGRectMake(CGRectGetMidX(root.view.bounds), CGRectGetMidY(root.view.bounds), 1, 1);
-    [root presentViewController:sheet animated:YES completion:nil];
-}
-
 @interface AppDelegate : UIResponder <UIApplicationDelegate>
 @property (strong, nonatomic) UIWindow* window;
 @end

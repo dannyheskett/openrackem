@@ -1,5 +1,5 @@
-// Store-screenshot generator: four portrait scenes at 540x960, upscaled to
-// the Play sizes by scripts/gen_store_assets.py's sibling PIL step:
+// Store-screenshot generator: five portrait scenes at 540x960, upscaled to
+// the Play sizes (nearest-neighbour x2 / x4, see android/play-assets/LISTING.md):
 //
 //   gcc -std=c99 -Isrc -Ithird_party/minih264 -Ithird_party/minimp4 -O2 \
 //       -DPLATFORM_WEB -Ithird_party/raylib-install/include \
@@ -12,6 +12,7 @@
 // trick tests/vis_shots.c uses); this file supplies main().
 #include "game.h"
 #include "render.h"
+#include "online_ui.h"
 #include <raylib.h>
 #include <stdio.h>
 #include <string.h>
@@ -64,9 +65,32 @@ int main(int argc, char** argv){
     g->players[0].score=120; g->players[1].score=95; g->players[2].score=210; g->players[3].score=160;
     snap("04-roundover", g, &ui);
 
+    // 05: an online waiting room between games, the last result on show.
+    static NetGame ng;
+    memset(&ng, 0, sizeof ng);
+    ng.state = NG_LOBBY;
+    NgLobby* L = &ng.lobby;
+    L->target = 500; L->me = 0; L->games = 1; L->count_ms = -1;
+    static const char* const names[] = {"Dan", "Alex", "Priya"};
+    for (int i = 0; i < 3; i++) {
+        snprintf(L->names[i], NG_NAME, "%s", names[i]);
+        snprintf(ng.handles[i], NG_NAME, "%s", names[i]);
+        L->used[i] = 1; L->on[i] = 1;
+    }
+    L->ready[1] = 1;
+    snprintf(L->block, sizeof L->block, "ready");
+    ng.have_result = true;
+    ng.game.phase = PHASE_MATCH_OVER;
+    ng.game.rules.player_count = 3;
+    ng.game.match_winner = 1;
+    ng.game.players[0].score = 430; ng.game.players[1].score = 515; ng.game.players[2].score = 300;
+    OnlineView lv = { .ng = &ng, .player = "DAN", .sel = 0 };
+    for(int i=0;i<3;i++) online_render_lobby(&lv);
+    char lp[256]; snprintf(lp,sizeof lp,"%s/05-online.png",SHOT_DIR); TakeScreenshot(lp);
+
     // 01: the menu.
-    static const char* items[] = {"New Game","Options","Sound: Off","Exit"};
-    for(int i=0;i<3;i++) render_menu("OPENRACKEM", items, 4, 0, 3);
+    static const char* items[] = {"New Game","Play Online","Options","Sound: Off","Exit"};
+    for(int i=0;i<3;i++) render_menu("OPENRACKEM", items, 5, 0, 4);
     char mp[256]; snprintf(mp,sizeof mp,"%s/01-menu.png",SHOT_DIR); TakeScreenshot(mp);
     render_cleanup();
     printf("store shots written\n");
