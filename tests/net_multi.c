@@ -207,8 +207,8 @@ static void scenario_room(int n) {
     WAIT(n, all_state(n, NG_IDLE), 3000);
     CHECK(all_state(n, NG_IDLE));
 
-    Rules r = rules_default();
-    r.target_score = 50;   // one player going out can decide it
+    NgRoomSetup r = netgame_room_default();
+    r.target = 50;   // one player going out can decide it
     netgame_create(&s_bots[0].ng, &r);
     WAIT(n, s_bots[0].ng.state == NG_LOBBY && s_bots[0].ng.have_lobby, 3000);
     long id = s_bots[0].ng.room_id;
@@ -241,8 +241,8 @@ static void scenario_rematch(void) {
     int n = 3;
     for (int i = 0; i < n; i++) bot_start(i, NULL);
     WAIT(n, all_state(n, NG_IDLE), 3000);
-    Rules r = rules_default();
-    r.target_score = 50;
+    NgRoomSetup r = netgame_room_default();
+    r.target = 50;
     netgame_create(&s_bots[0].ng, &r);
     WAIT(n, s_bots[0].ng.have_lobby, 3000);
     long id = s_bots[0].ng.room_id;
@@ -296,8 +296,8 @@ static void scenario_partners(void) {
     int n = 4;
     for (int i = 0; i < n; i++) bot_start(i, NULL);
     WAIT(n, all_state(n, NG_IDLE), 3000);
-    Rules r = rules_default();
-    r.target_score = 50;
+    NgRoomSetup r = netgame_room_default();
+    r.target = 50;
     r.partners = true;
     netgame_create(&s_bots[0].ng, &r);
     WAIT(n, s_bots[0].ng.have_lobby, 3000);
@@ -330,8 +330,8 @@ static void scenario_step_away(void) {
     int n = 2;
     for (int i = 0; i < n; i++) bot_start(i, NULL);
     WAIT(n, all_state(n, NG_IDLE), 3000);
-    Rules r = rules_default();
-    r.target_score = 500;   // long enough to step away and back mid-match
+    NgRoomSetup r = netgame_room_default();
+    r.target = 500;   // long enough to step away and back mid-match
     netgame_create(&s_bots[0].ng, &r);
     WAIT(n, s_bots[0].ng.have_lobby, 3000);
     join_via_list(n, 1, s_bots[0].ng.room_id);
@@ -370,8 +370,8 @@ static void scenario_away_at_end(void) {
     int n = 2;
     for (int i = 0; i < n; i++) bot_start(i, NULL);
     WAIT(n, all_state(n, NG_IDLE), 3000);
-    Rules r = rules_default();
-    r.target_score = 50;
+    NgRoomSetup r = netgame_room_default();
+    r.target = 50;
     netgame_create(&s_bots[0].ng, &r);
     WAIT(n, s_bots[0].ng.have_lobby, 3000);
     long id = s_bots[0].ng.room_id;
@@ -405,8 +405,8 @@ static void scenario_restart(void) {
     int n = 3;
     for (int i = 0; i < n; i++) bot_start(i, NULL);
     WAIT(n, all_state(n, NG_IDLE), 3000);
-    Rules r = rules_default();
-    r.target_score = 50;
+    NgRoomSetup r = netgame_room_default();
+    r.target = 50;
     netgame_create(&s_bots[0].ng, &r);
     WAIT(n, s_bots[0].ng.have_lobby, 3000);
     long id = s_bots[0].ng.room_id;
@@ -440,6 +440,58 @@ static void scenario_restart(void) {
     close_all(n);
 }
 
+// --- 7. A two-seat room ---------------------------------------------------------------
+// Made with its own settings; listed with its capacity while a seat is open;
+// off the list and closed to a third once the two seats are taken.
+static void scenario_two_seats(void) {
+    printf("== two-seat room ==\n");
+    int n = 3;
+    for (int i = 0; i < n; i++) bot_start(i, NULL);
+    WAIT(n, all_state(n, NG_IDLE), 3000);
+    NgRoomSetup r = netgame_room_default();
+    r.target = 50;
+    r.seats = 2;
+    r.bonus = true;
+    netgame_create(&s_bots[0].ng, &r);
+    WAIT(n, s_bots[0].ng.state == NG_LOBBY && s_bots[0].ng.have_lobby, 3000);
+    long id = s_bots[0].ng.room_id;
+    CHECK(s_bots[0].ng.lobby.seats == 2 && s_bots[0].ng.lobby.bonus);
+    CHECK(s_bots[0].ng.lobby.target == 50);
+
+    netgame_list(&s_bots[2].ng);
+    bool seen = false;
+    int seats = 0;
+    for (int s = 0; s < 3000 && !seen; s++) {
+        pump(n);
+        for (int k = 0; k < s_bots[2].ng.room_count; k++) {
+            if (s_bots[2].ng.rooms[k].id == id) { seen = true; seats = s_bots[2].ng.rooms[k].seats; }
+        }
+    }
+    CHECK(seen && seats == 2);
+
+    join_via_list(n, 1, id);
+    WAIT(n, lobby_count(&s_bots[0].ng) == 2, 3000);
+    bool gone = false;
+    for (int s = 0; s < 4000 && !gone; s++) {
+        pump(n);
+        gone = true;
+        for (int k = 0; k < s_bots[2].ng.room_count; k++) {
+            if (s_bots[2].ng.rooms[k].id == id) gone = false;
+        }
+    }
+    CHECK(gone);
+    netgame_join_room(&s_bots[2].ng, id);
+    WAIT(n, s_bots[2].ng.notice[0] != '\0', 3000);
+    CHECK(strcmp(s_bots[2].ng.notice, "full") == 0 && s_bots[2].ng.state == NG_IDLE);
+    printf("  full at two: the third was turned away\n");
+
+    ready_and_start(2);
+    CHECK(s_bots[0].ng.game.rules.player_count == 2);
+    CHECK(s_bots[0].ng.game.rules.bonus_scoring && s_bots[1].ng.game.rules.bonus_scoring);
+    play_to_lobby(2);
+    close_all(n);
+}
+
 int main(void) {
     signal(SIGPIPE, SIG_IGN);
 
@@ -455,6 +507,7 @@ int main(void) {
     scenario_step_away();
     scenario_away_at_end();
     scenario_restart();
+    scenario_two_seats();
 
     stop_daemon();
     char path[96];
@@ -463,7 +516,8 @@ int main(void) {
     rmdir(s_datadir);
 
     if (failures == 0) {
-        printf("OK: rooms 2/3/4, three-game room, partners, step-away, away at end, restarts\n");
+        printf("OK: rooms 2/3/4, three-game room, partners, step-away, away at end, restarts,\n"
+               "    two-seat room\n");
         return 0;
     }
     printf("FAILED: %d check(s)\n", failures);

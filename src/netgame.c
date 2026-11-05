@@ -259,11 +259,18 @@ bool netgame_parse_state(NetGame* ng, const char* json, size_t len) {
     return true;
 }
 
+// A room's capacity from the wire: 2..4, and four when the server doesn't say
+// (one from before the setting existed) or says something else.
+static int seats_or_default(long v) {
+    return (v >= RULES_SEATS_MIN && v <= RULES_SEATS_MAX) ? (int)v : MAX_PLAYERS;
+}
+
 bool netgame_parse_lobby(NetGame* ng, const char* json) {
     if (js_int(json, "v", -1) != NG_PROTO) return false;
     NgLobby nl;
     memset(&nl, 0, sizeof nl);
     nl.id = js_int(json, "id", -1);
+    nl.seats = seats_or_default(js_int(json, "seats", MAX_PLAYERS));
     nl.target = (int)js_int(json, "target", 500);
     nl.bonus = js_int(json, "bonus", 0) != 0;
     nl.partners = js_int(json, "partners", 0) != 0;
@@ -297,6 +304,8 @@ bool netgame_parse_rooms(NetGame* ng, const char* json) {
     int nt = js_ints(json, "targets", tg, NG_LIST_MAX);
     int nb = js_ints(json, "bonus", bo, NG_LIST_MAX);
     int np = js_ints(json, "partners", pa, NG_LIST_MAX);
+    int se[NG_LIST_MAX];
+    int ns = js_ints(json, "seats", se, NG_LIST_MAX);
     memset(ng->rooms, 0, sizeof ng->rooms);
     const char* np_ = js_outer(json, "names");
     const char* rp_ = js_outer(json, "ready");
@@ -306,6 +315,7 @@ bool netgame_parse_rooms(NetGame* ng, const char* json) {
         row->target = i < nt ? tg[i] : 500;
         row->bonus = i < nb && bo[i];
         row->partners = i < np && pa[i];
+        row->seats = seats_or_default(i < ns ? se[i] : MAX_PLAYERS);
         if (np_ && (np_ = next_inner(np_)) != NULL) {
             row->n = js_strs_at(np_, row->names, MAX_PLAYERS, &np_);
         }
@@ -327,18 +337,18 @@ static bool send_json(NetGame* ng, const char* json) {
     return ng->conn && net_send(ng->conn, json, strlen(json));
 }
 
-static void sendf(NetGame* ng, const char* fmt, ...)
+static bool sendf(NetGame* ng, const char* fmt, ...)
 #ifdef __GNUC__
     __attribute__((format(printf, 2, 3)))
 #endif
     ;
-static void sendf(NetGame* ng, const char* fmt, ...) {
+static bool sendf(NetGame* ng, const char* fmt, ...) {
     char buf[256];
     va_list ap;
     va_start(ap, fmt);
     int n = vsnprintf(buf, sizeof buf, fmt, ap);
     va_end(ap);
-    if (n > 0 && (size_t)n < sizeof buf) send_json(ng, buf);
+    return n > 0 && (size_t)n < sizeof buf && send_json(ng, buf);
 }
 
 // Keys from prefs are user-editable: keep them wire-safe.
@@ -393,6 +403,7 @@ static void to_idle(NetGame* ng) {
     ng->have_game = false;
     ng->have_result = false;
     ng->pending = false;
+    ng->joining = false;
     if (ng->listing) netgame_list(ng);   // resubscribe
 }
 
@@ -401,6 +412,7 @@ static void handle_message(NetGame* ng, const char* msg, size_t n, unsigned* eve
     if (!js_str(msg, "t", type, sizeof type)) return;
 
     if (strcmp(type, "hi") == 0) {
+        ng->joining = false;       // a fresh connection: nothing is in flight
         if (ng->rejoining && ng->key[0]) {
             sendf(ng, "{\"t\":\"rejoin\",\"key\":\"%s\"}", ng->key);
         } else {
@@ -414,6 +426,7 @@ static void handle_message(NetGame* ng, const char* msg, size_t n, unsigned* eve
         ng->in_room = true;
         ng->stale_key[0] = '\0';   // surrendered (or reclaimed) by now
         ng->listing = false;
+        ng->joining = false;
         ng->state = js_int(msg, "playing", 0) ? NG_PLAYING : NG_LOBBY;
     } else if (strcmp(type, "lobby") == 0) {
         if (netgame_parse_lobby(ng, msg)) {
@@ -447,6 +460,7 @@ static void handle_message(NetGame* ng, const char* msg, size_t n, unsigned* eve
         char code[16] = {0};
         js_str(msg, "code", code, sizeof code);
         ng->pending = false;       // a rejection frees the next attempt
+        ng->joining = false;
         if (strcmp(code, "upgrade") == 0 || strcmp(code, "need_name") == 0 ||
             strcmp(code, "bad_name") == 0) {
             ng->state = NG_ERROR;
@@ -538,26 +552,43 @@ void netgame_unlist(NetGame* ng) {
     ng->listing = false;
 }
 
-void netgame_create(NetGame* ng, const Rules* rules) {
-    if (ng->state != NG_IDLE) return;
-    Rules r = rules ? *rules : rules_default();
+NgRoomSetup netgame_room_default(void) {
+    NgRoomSetup rs = { .seats = RULES_SEATS_MAX, .target = 500, .bonus = false, .partners = false };
+    return rs;
+}
+
+void netgame_room_normalize(NgRoomSetup* rs) {
+    if (rs->seats < RULES_SEATS_MIN || rs->seats > RULES_SEATS_MAX) rs->seats = RULES_SEATS_MAX;
+    if (!rules_target_valid(rs->target)) rs->target = 500;
+    if (rs->seats != RULES_SEATS_MAX) rs->partners = false;   // Partners is four players
+}
+
+// Create, join and rejoin each ask for a seat, and the server answers each
+// with a welcome or an error. Until it does, another ask is dropped: the
+// first one is already being acted on, and a second would only be refused
+// (we would be in a room by the time it arrived).
+void netgame_create(NetGame* ng, const NgRoomSetup* setup) {
+    if (ng->state != NG_IDLE || ng->joining) return;
+    NgRoomSetup rs = setup ? *setup : netgame_room_default();
+    netgame_room_normalize(&rs);
     char sk[64];
     stale_suffix(ng, sk, sizeof sk);
-    sendf(ng, "{\"t\":\"create\",\"target\":%d,\"bonus\":%d,\"partners\":%d%s}",
-          r.target_score, r.bonus_scoring ? 1 : 0, r.partners ? 1 : 0, sk);
+    ng->joining = sendf(ng, "{\"t\":\"create\",\"target\":%d,\"bonus\":%d,\"partners\":%d,"
+                            "\"seats\":%d%s}",
+                        rs.target, rs.bonus ? 1 : 0, rs.partners ? 1 : 0, rs.seats, sk);
 }
 
 void netgame_join_room(NetGame* ng, long id) {
-    if (ng->state != NG_IDLE) return;
+    if (ng->state != NG_IDLE || ng->joining) return;
     char sk[64];
     stale_suffix(ng, sk, sizeof sk);
-    sendf(ng, "{\"t\":\"join\",\"room\":%ld%s}", id, sk);
+    ng->joining = sendf(ng, "{\"t\":\"join\",\"room\":%ld%s}", id, sk);
 }
 
 void netgame_rejoin(NetGame* ng, const char* key) {
-    if (ng->state != NG_IDLE) return;
+    if (ng->state != NG_IDLE || ng->joining) return;
     copy_ident(ng->key, sizeof ng->key, key);
-    if (ng->key[0]) sendf(ng, "{\"t\":\"rejoin\",\"key\":\"%s\"}", ng->key);
+    if (ng->key[0]) ng->joining = sendf(ng, "{\"t\":\"rejoin\",\"key\":\"%s\"}", ng->key);
 }
 
 // --- Waiting room ---------------------------------------------------------------

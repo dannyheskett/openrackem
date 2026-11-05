@@ -116,6 +116,22 @@ static void test_rules_normalize(void) {
     CHECK(r.ai_difficulty == 0);
     r = rules_default(); r.target_score = 1; rules_normalize(&r);
     CHECK(r.target_score == 50);
+    r = rules_default(); r.target_score = 99999; rules_normalize(&r);
+    CHECK(r.target_score == RULES_TARGET_MAX);
+
+    // One definition of a valid target, for the engine, the screens and the
+    // daemon; everything the screens offer is inside it.
+    CHECK(rules_target_valid(RULES_TARGET_MIN) && rules_target_valid(RULES_TARGET_MAX));
+    CHECK(!rules_target_valid(RULES_TARGET_MIN - 1) && !rules_target_valid(RULES_TARGET_MAX + 1));
+    for (int i = 0; i < RULES_TARGET_CHOICES_N; i++) {
+        CHECK(rules_target_valid(RULES_TARGET_CHOICES[i]));
+    }
+
+    // An online room: 2 to 4 seats, a valid target, Partners only with four.
+    CHECK(rules_room_valid(2, 500, false) && rules_room_valid(4, 1000, true));
+    CHECK(!rules_room_valid(1, 500, false) && !rules_room_valid(5, 500, false));
+    CHECK(!rules_room_valid(3, 500, true) && !rules_room_valid(4, 49, false));
+    CHECK(RULES_SEATS_MAX == MAX_PLAYERS);
 }
 
 // --- Deal --------------------------------------------------------------------
@@ -155,23 +171,26 @@ static void test_deal_invariants(void) {
 
 // Deal order: one card at a time starting left of the dealer, each player's
 // first card to slot #50 (index 9) down to #5, then the flip. Verified by
-// replaying the same rng primitives the engine used.
+// replaying the same deal-stream primitives the engine used.
 static void test_deal_order(void) {
     const uint64_t SEED = 7777;
     const int players = 3;
     Game* g = fresh(players, SEED);
     int deck = rules_deck_size(&g->rules);
 
-    uint64_t s = SEED;
-    int dealer = (int)rng_below(&s, (uint32_t)players);
+    DealStream ds;
+    deal_stream(&ds, SEED, DEAL_DEALER, 0, 0);
+    int dealer = (int)deal_below(&ds, (uint32_t)players);
     CHECK(dealer == g->dealer);
 
     uint8_t expect[MAX_CARDS];
     for (int i = 0; i < deck; i++) expect[i] = (uint8_t)(i + 1);
+    deal_stream(&ds, SEED, DEAL_SHUFFLE, 0, 0);   // the first deal of the match
     for (int i = deck - 1; i > 0; i--) {
-        uint32_t j = rng_below(&s, (uint32_t)(i + 1));
+        uint32_t j = deal_below(&ds, (uint32_t)(i + 1));
         uint8_t t = expect[i]; expect[i] = expect[j]; expect[j] = t;
     }
+    CHECK(g->deals == 1);
 
     int idx = 0;
     for (int slot = RACK_SLOTS - 1; slot >= 0; slot--) {
@@ -187,6 +206,99 @@ static void test_deal_order(void) {
 }
 
 // --- Legality ----------------------------------------------------------------
+// --- The deal stream -----------------------------------------------------------
+// The shuffle's source: ChaCha20 keyed by the seed. The block function is
+// pinned to the RFC's own vector, so "ChaCha20" here means the real one.
+static void test_deal_stream(void) {
+    // RFC 8439 §2.3.2: key 00..1f, nonce 00:00:00:09:00:00:00:4a:00:00:00:00,
+    // block counter 1.
+    uint32_t key[8];
+    for (int i = 0; i < 8; i++) {
+        key[i] = (uint32_t)(4 * i) | (uint32_t)(4 * i + 1) << 8 |
+                 (uint32_t)(4 * i + 2) << 16 | (uint32_t)(4 * i + 3) << 24;
+    }
+    const uint32_t nonce[3] = {0x09000000u, 0x4a000000u, 0x00000000u};
+    static const uint32_t want[16] = {
+        0xe4e7f110u, 0x15593bd1u, 0x1fdd0f50u, 0xc47120a3u,
+        0xc7f4d1c7u, 0x0368c033u, 0x9aaa2204u, 0x4e6cd4c3u,
+        0x466482d2u, 0x09aa9f07u, 0x05d7c214u, 0xa2028bd9u,
+        0xd19c12b5u, 0xb94e16deu, 0xe883d0cbu, 0x4e3c50a2u,
+    };
+    uint32_t out[16];
+    chacha20_block(key, 1, nonce, out);
+    CHECK(memcmp(out, want, sizeof want) == 0);
+
+    // A stream is a function of (seed, purpose, deal, sub) and nothing else:
+    // the same four give the same words, and changing any one gives others.
+    DealStream a, b;
+    deal_stream(&a, 42, DEAL_SHUFFLE, 3, 0);
+    deal_stream(&b, 42, DEAL_SHUFFLE, 3, 0);
+    uint64_t first = deal_next(&a);
+    CHECK(first == deal_next(&b));
+    for (int i = 0; i < 40; i++) CHECK(deal_next(&a) == deal_next(&b));   // across blocks
+    deal_stream(&b, 43, DEAL_SHUFFLE, 3, 0); CHECK(deal_next(&b) != first);
+    deal_stream(&b, 42, DEAL_DEALER, 3, 0);  CHECK(deal_next(&b) != first);
+    deal_stream(&b, 42, DEAL_SHUFFLE, 4, 0); CHECK(deal_next(&b) != first);
+    deal_stream(&b, 42, DEAL_SHUFFLE, 3, 1); CHECK(deal_next(&b) != first);
+
+    // deal_below stays in range and reaches every value.
+    deal_stream(&a, 7, DEAL_SHUFFLE, 0, 0);
+    bool hit[60] = {false};
+    for (int i = 0; i < 4000; i++) {
+        uint32_t v = deal_below(&a, 60);
+        CHECK(v < 60);
+        if (v < 60) hit[v] = true;
+    }
+    for (int i = 0; i < 60; i++) CHECK(hit[i]);
+
+    // Each round is dealt from its own stream: the deal counter moves with
+    // every deal, never saturates the way the round number does, and two
+    // rounds of one match are different shuffles.
+    Game* g = fresh(4, 2024);
+    CHECK(g->deals == 1);
+    uint8_t round1[MAX_CARDS];
+    memcpy(round1, g->stock, g->stock_count);
+    int n1 = g->stock_count;
+    g->phase = PHASE_ROUND_OVER;
+    g->round_no = 255;
+    game_next_round(g);
+    CHECK(g->deals == 2 && g->round_no == 255);
+    CHECK(g->stock_count == n1 && memcmp(round1, g->stock, (size_t)n1) != 0);
+    g->phase = PHASE_ROUND_OVER;
+    game_next_round(g);
+    CHECK(g->deals == 3);
+
+    // The AI's dice start from the stream, not from the seed itself, and an
+    // unseeded game is the one fixed seed.
+    g = fresh(4, 2024);
+    CHECK(g->rng != 2024 && g->rng != 0);
+    Rules r = rules_default();
+    r.seed = 0;
+    Game z, k;
+    game_init(&z, &r);
+    r.seed = 0x9E3779B97F4A7C15ULL;
+    game_init(&k, &r);
+    CHECK(memcmp(z.stock, k.stock, sizeof z.stock) == 0 && z.dealer == k.dealer);
+    CHECK(memcmp(z.players, k.players, sizeof z.players) == 0);
+
+    // A reshuffled stockpile (the non-official option) has a stream of its
+    // own per turn-over, and replays.
+    r = rules_default();
+    r.seed = 99;
+    r.reshuffle_on_recycle = true;
+    Game p, q;
+    game_init(&p, &r);
+    game_init(&q, &r);
+    for (int i = 0; i < 4096 && p.phase == PHASE_DEAL; i++) { game_update(&p); game_update(&q); }
+    for (int turn = 0; turn < 400 && p.recycles < 2 && p.phase != PHASE_ROUND_OVER; turn++) {
+        Action a1 = {ACTION_DRAW_STOCK, 0}, a2 = {ACTION_DISCARD, 0};
+        CHECK(game_apply(&p, a1) && game_apply(&q, a1));
+        if (p.phase == PHASE_PLACE) CHECK(game_apply(&p, a2) && game_apply(&q, a2));
+    }
+    CHECK(p.recycles == 2);
+    CHECK(memcmp(&p, &q, GAME_SERIAL_SIZE) == 0);
+}
+
 static void test_legality(void) {
     Game* g = fresh(3, 42);
 
@@ -844,6 +956,7 @@ int main(void) {
     test_rules_normalize();
     test_deal_invariants();
     test_deal_order();
+    test_deal_stream();
     test_legality();
     test_exchange();
     test_recycle();

@@ -97,7 +97,7 @@ void rules_normalize(Rules* r);
 
 `rules_normalize` is the single place the official derivations live (deck subset from player count, the 2-player run requirement always on, partners requires exactly 4). It is directly unit-tested.
 
-The Options menu exposes: players, difficulty, bonus scoring, partners, target score. Nothing else.
+The Options menu exposes: players, difficulty, bonus scoring, partners, target score. Nothing else. They are the rules of a game against the CPU. An online room has its own settings (seats, target score, bonus scoring, partners), chosen on the New Room screen when the room is made (`docs/PLAN-MULTIPLAYER.md` §7); the two screens share nothing but the valid target range and choices, defined once in `rules.h`.
 
 ## 5. Architecture
 
@@ -139,7 +139,8 @@ typedef enum {
 
 typedef struct {
     Rules   rules;
-    uint64_t rng;                 // xorshift64* state; the ONLY randomness source
+    uint64_t rng;                 // xorshift64* state for the AI's dice; the cards
+                                  // come from the seed-keyed deal stream (§14.2)
     Player  players[MAX_PLAYERS];
     uint8_t stock[MAX_CARDS];     // stock[0] is the top
     uint8_t stock_count;
@@ -153,6 +154,7 @@ typedef struct {
     uint8_t recycles;             // stockpile turn-overs this round
     uint8_t round_winner;         // 0xFF = none (stalemate)
     uint16_t round_points[MAX_PLAYERS];
+    uint32_t deals;               // deals so far: with the seed, the next shuffle's input
     unsigned events;              // EV_* flags for this step, cleared each step
     /* presentation-only, excluded from the serialized form */
     Anim    anim;
@@ -294,7 +296,7 @@ Each milestone ends green: builds clean, `make test` passes, CI passes.
 Honored from the first line of v1, so the server reuses `game.c` without a rewrite:
 
 1. `Game` is a flat POD with no pointers and no heap references. A snapshot is a `memcpy`; a test enforces this.
-2. All randomness comes from the seeded `rng` field. `rand()`, `srand()`, and wall-clock reads never appear in `game.c` or `ai.c`. A game is fully reproducible from `(seed, Rules, action list)`, which is exactly what a server needs for replay, audit, and reconnect.
+2. All randomness comes from the seed. `rand()`, `srand()`, and wall-clock reads never appear in `game.c` or `ai.c`. A game is fully reproducible from `(seed, Rules, action list)`, which is exactly what a server needs for replay, audit, and reconnect. The first dealer and every shuffle are drawn from a ChaCha20 keystream (the RFC 8439 block function, pinned to its test vector) keyed by the seed and named by a (purpose, deal number, sub-index) nonce; the `rng` field is an xorshift64* state, started from that stream, for the AI's own dice. The shuffle was xorshift itself until 2026-11-05. That replayed just as well, but a player sees a good part of each shuffle — their rack, the first discard, every card they draw — and a 64-bit generator whose every output is a simple function of its state can in principle be solved from that for the cards they did not see. With the keystream, recovering them means searching the seed space.
 3. Rules logic never calls raylib, the renderer, audio, or platform code. `game.c` + `rules.c` + `ai.c` compile standalone with only libc.
 4. Hidden information is redacted by construction through `GameView`. The same function that feeds the local AI will feed a remote client, so v1's AI is a working proof that the redaction is complete.
 5. `game_apply` is total and validating: it never trusts its input and never partially mutates on rejection. Untrusted network input is the same code path as a mis-clicked button.

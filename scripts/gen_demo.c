@@ -32,7 +32,8 @@
 #define YOU_THINK_PLACE 36        // ...and before placing
 #define SCORE_FRAMES   270        // the round scoring screen
 #define STAND_FRAMES   240        // the standings page
-#define DEFAULT_SEED   20261316ULL
+#define DEFAULT_SEED   20261344ULL   // re-picked with `find` whenever the engine's
+                                     // shuffle changes (last: the keystream deal)
 
 // One 60 Hz step of the demo's game: the engine paces the CPUs, this paces you.
 typedef struct {

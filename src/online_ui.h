@@ -49,7 +49,8 @@ typedef struct {
 int online_list_rows(const OnlineView* v, OlRow rows[OL_MAX_ROWS]);
 int online_list_pinned(const OlRow* rows, int n);   // how many are pinned
 
-// The waiting room's buttons in focus order. Returns the count.
+// The waiting room's buttons in focus order. Returns the count. While the
+// start countdown runs only Leave is offered.
 int online_lobby_buttons(const OnlineView* v, int ids[4]);
 
 // The waiting room's result line for the last match ("" when there is none):

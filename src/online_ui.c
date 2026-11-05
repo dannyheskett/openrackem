@@ -88,6 +88,12 @@ static void draw_button(int id, int x, int y, int w, int h, const char* label,
     hit_add(id, x, y, w, h);
 }
 
+// A room's capacity for drawing: what the session holds, or four when it holds
+// nothing (a view built by hand, or a server from before the setting).
+static int seats_of(int seats) {
+    return (seats >= RULES_SEATS_MIN && seats <= RULES_SEATS_MAX) ? seats : MAX_PLAYERS;
+}
+
 static void rules_line(char* out, size_t n, int target, bool bonus, bool partners) {
     snprintf(out, n, "PLAY TO %d%s%s", target, bonus ? " - BONUS" : "",
              partners ? " - PARTNERS" : "");
@@ -132,7 +138,7 @@ static void draw_row(const OnlineView* v, const OlRow* row, int idx, int x, int 
         break;
     case OLR_NEW:
         snprintf(t, sizeof t, "NEW ROOM");
-        snprintf(s, sizeof s, "START A TABLE AND WAIT FOR PLAYERS");
+        snprintf(s, sizeof s, "SET THE RULES AND WAIT FOR PLAYERS");
         break;
     case OLR_ROOM: {
         const NgRoomRow* rr = &ng->rooms[row->room];
@@ -142,7 +148,7 @@ static void draw_row(const OnlineView* v, const OlRow* row, int idx, int x, int 
         draw_names(x + pad, ty, tfs, tw, nm, rr->ready, k, WHITE);
         char rl[48];
         rules_line(rl, sizeof rl, rr->target, rr->bonus, rr->partners);
-        snprintf(s, sizeof s, "%d/4 - %s", rr->n, rl);
+        snprintf(s, sizeof s, "%d/%d - %s", rr->n, seats_of(rr->seats), rl);
         gfx_text(s, x + pad, sy, fit(s, sfs, tw), SLOT_LABEL);
         return;
     }
@@ -229,12 +235,20 @@ void online_render_list(OnlineView* v) {
 }
 
 // --- Waiting room ---------------------------------------------------------------------
+// Everyone is ready and the start countdown is running.
+static bool lobby_counting(const NgLobby* L) {
+    return L->block[0] == '\0' && L->count_ms >= 0;
+}
+
 int online_lobby_buttons(const OnlineView* v, int ids[4]) {
     const NgLobby* L = &v->ng->lobby;
     int n = 0;
-    ids[n++] = OLB_READY;
-    if (L->can_force) ids[n++] = OLB_FORCE;
-    if (L->partners) ids[n++] = OLB_SWITCH;
+    // The countdown is a commitment: the server takes neither an un-ready nor
+    // a team switch while it runs, so neither is offered. Leave always is.
+    bool counting = lobby_counting(L);
+    if (!counting) ids[n++] = OLB_READY;
+    if (L->can_force && !counting) ids[n++] = OLB_FORCE;
+    if (L->partners && !counting) ids[n++] = OLB_SWITCH;
     ids[n++] = OLB_LEAVE;
     return n;
 }
@@ -315,7 +329,7 @@ static void draw_member(const NgLobby* L, int mi, int x, int y, int rw, int rh) 
 }
 
 static void status_text(const NgLobby* L, char* out, size_t n) {
-    if (L->block[0] == '\0' && L->count_ms >= 0) {
+    if (lobby_counting(L)) {
         snprintf(out, n, "STARTING IN %d", (L->count_ms + 999) / 1000);
     } else if (strcmp(L->block, "need2") == 0) {
         snprintf(out, n, "WAITING FOR ANOTHER PLAYER");
@@ -373,8 +387,21 @@ static void draw_lobby_cb(void* p) {
     // Members.
     int row_h = clampi(h / 13, 30, 170), gap = m / 3;
     if (!L->partners) {
+        // One row per seat: the members, then the seats still open. (Member
+        // slots are not seats — with two seats the pair may sit in any two of
+        // the four slots — so the open rows are drawn from a free slot.)
+        int seats = seats_of(L->seats), shown = 0, free_i = -1;
         for (int i = 0; i < MAX_PLAYERS; i++) {
+            if (!L->used[i]) {
+                if (free_i < 0) free_i = i;
+                continue;
+            }
             draw_member(L, i, m, y, rw, row_h);
+            y += row_h + gap;
+            shown++;
+        }
+        for (; shown < seats && free_i >= 0; shown++) {
+            draw_member(L, free_i, m, y, rw, row_h);
             y += row_h + gap;
         }
     } else {
@@ -405,7 +432,7 @@ static void draw_lobby_cb(void* p) {
     // Status: why it can't start, or the countdown.
     char st[64];
     status_text(L, st, sizeof st);
-    bool counting = L->block[0] == '\0' && L->count_ms >= 0;
+    bool counting = lobby_counting(L);
     int st_fs = counting ? clampi(h / 18, 14, 110) : clampi(h / 34, 10, 64);
     y += m / 2;
     text_centered(st, w / 2, y, fit(st, st_fs, rw), counting ? ACCENT : WHITE);

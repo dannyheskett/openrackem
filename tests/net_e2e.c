@@ -56,8 +56,8 @@ int main(void) {
 
     // Two clients: A creates a room, B finds it in the list and joins, both ready.
     NetGame a, b;
-    Rules r = rules_default();
-    r.target_score = 50;    // shortest match: one player going out decides it
+    NgRoomSetup r = netgame_room_default();
+    r.target = 50;    // shortest match: one player going out decides it
     netgame_start(&a, "127.0.0.1", port, false, "Alice", NULL);
     netgame_start(&b, "127.0.0.1", port, false, "Bob", NULL);
     for (int i = 0; i < 2000 && (a.state != NG_IDLE || b.state != NG_IDLE); i++) {

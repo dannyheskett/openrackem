@@ -67,6 +67,7 @@ static void shoot_online(const char* mode) {
         ng.rooms[i].id = 100 + i;
         ng.rooms[i].n = counts[i];
         set_names(ng.rooms[i].names, rn[i], counts[i]);
+        ng.rooms[i].seats = i == 1 ? 2 : i == 3 ? 3 : 4;   // "1/2", "2/3", else of 4
         ng.rooms[i].target = i == 1 ? 250 : 500;
         ng.rooms[i].bonus = i == 1;
         ng.rooms[i].partners = i == 2;
@@ -83,6 +84,12 @@ static void shoot_online(const char* mode) {
     v.notice = "THAT ROOM IS FULL";
     for (int i = 0; i < 3; i++) online_render_list(&v);
     snap(mode, "online-list-return");
+
+    // New Room (labels fabricated; the real ones come from main.c).
+    static const char* const nr[] = {"Seats: 2", "Play To: 500", "Bonus Scoring: On",
+                                     "Partners: Off", "Create Room", "Back"};
+    for (int i = 0; i < 3; i++) render_menu("NEW ROOM", nr, 6, 4, 4);
+    snap(mode, "online-new-room");
 
     // A waiting room: three in, one ready.
     ng.state = NG_LOBBY;
@@ -130,6 +137,26 @@ static void shoot_online(const char* mode) {
     for (int i = 0; i < 4; i++) { L->used[i] = 1; L->on[i] = 1; L->ready[i] = 0; L->team[i] = i & 1; }
     for (int i = 0; i < 3; i++) online_render_lobby(&lv);
     snap(mode, "online-lobby-partners");
+
+    // A two-seat room with one seat open, then full and counting down (the
+    // countdown is a commitment: only Leave is offered).
+    memset(L, 0, sizeof *L);
+    L->seats = 2;
+    L->target = 250;
+    L->bonus = true;
+    L->me = 1;                      // the pair need not sit in slots 0 and 1
+    static const char* const two[] = {"", "Dan", "", "Alex"};
+    set_names(L->names, two, 4);
+    L->used[1] = 1; L->on[1] = 1; L->ready[1] = 1;
+    L->count_ms = -1;
+    snprintf(L->block, sizeof L->block, "need2");
+    for (int i = 0; i < 3; i++) online_render_lobby(&lv);
+    snap(mode, "online-lobby-two-seats");
+    L->used[3] = 1; L->on[3] = 1; L->ready[3] = 1;
+    L->block[0] = '\0';
+    L->count_ms = 1400;
+    for (int i = 0; i < 3; i++) online_render_lobby(&lv);
+    snap(mode, "online-lobby-two-seats-starting");
 }
 
 // The table with the online overlay: an away seat, the turn clock, and the
@@ -208,6 +235,9 @@ static void shoot_all(const char* mode) {
     shoot(mode, "round-over", g, &ui);
     ui.standings = true;
     shoot(mode, "standings", g, &ui);
+    g->rules.bonus_scoring = true;      // the variant is named where the scores are
+    shoot(mode, "standings-bonus", g, &ui);
+    g->rules.bonus_scoring = false;
 
     // Match over.
     g->phase = PHASE_MATCH_OVER;

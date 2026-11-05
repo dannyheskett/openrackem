@@ -28,10 +28,9 @@ CFLAGS_COMMON := -std=c99 -Wall -Wextra -I$(MINIH264_INC) -I$(MINIMP4_INC) -Isrc
 # TLS for the native online client's wss:// support (net_posix.c). Detected via
 # pkg-config so the Linux build links the system OpenSSL, exactly as it links
 # raylib / X11 / GL. Absent -> OR_TLS undefined and the client is plain-ws only.
-# Applied to the Linux target only: Windows (mingw, no OpenSSL) and the macOS
-# universal build (homebrew OpenSSL is arm64-only, unlinkable for x86_64) stay
-# plain-ws until a platform-native TLS backend (SChannel / Secure Transport)
-# lands; they reach the public wss server via a local tunnel meanwhile.
+# Applied to the Linux target only: Windows and macOS don't use OpenSSL. They
+# get wss:// from the platform's own TLS instead (net_win.c over SChannel,
+# net_apple.mm over Network.framework).
 ifeq ($(shell pkg-config --exists openssl 2>/dev/null && echo yes),yes)
 TLS_CFLAGS := -DOR_TLS $(shell pkg-config --cflags openssl)
 TLS_LIBS   := $(shell pkg-config --libs openssl)

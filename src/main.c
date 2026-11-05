@@ -35,6 +35,7 @@ typedef enum {
 // Screens within STATE_ONLINE that the session state alone doesn't decide.
 typedef enum {
     OS_LIST = 0,      // no overlay: the room list, waiting room, or table
+    OS_NEW_ROOM,      // New Room: the settings a room is made with
     OS_GAME_MENU,     // mid-match menu: resume / step away / forfeit
     OS_FORFEIT,       // forfeit confirmation
 } OnlineScreen;
@@ -58,7 +59,9 @@ typedef enum {
 
 // The Options screen exposes exactly what the plan allows: players, difficulty,
 // bonus scoring, partners, target score. Everything else stays at the official
-// defaults. The chosen values persist across games within a session.
+// defaults. The chosen values persist across games within a session. They are
+// the rules of a game against the CPU and nothing else: an online room has
+// its own settings, chosen on the New Room screen (see s_room below).
 static Rules s_options;
 static bool  s_options_ready = false;
 
@@ -148,10 +151,18 @@ static int build_options(const char* labels[]) {
     return OPT_ITEMS;
 }
 
+// The next Play To choice from `cur` in direction `dir` (+1 / -1), wrapping.
+// A value that isn't one of the choices starts from the default.
+static int cycle_target(int cur, int dir) {
+    int n = RULES_TARGET_CHOICES_N;
+    int at = 1; // default 500
+    for (int i = 0; i < n; i++) if (RULES_TARGET_CHOICES[i] == cur) at = i;
+    return RULES_TARGET_CHOICES[(at + n + dir) % n];
+}
+
 // Cycle one Options value by `dir` (+1 / -1). Normalization keeps every
 // combination legal (partners drops off below 4 players, etc.).
 static void cycle_option(int item, int dir) {
-    static const int TARGETS[] = {250, 500, 750, 1000};
     Rules* r = current_options();
     switch (item) {
     case OPT_PLAYERS:
@@ -168,13 +179,9 @@ static void cycle_option(int item, int dir) {
     case OPT_PARTNERS:
         if (r->player_count == 4) r->partners = !r->partners;
         break;
-    case OPT_TARGET: {
-        int n = (int)(sizeof TARGETS / sizeof TARGETS[0]);
-        int cur = 1; // default 500
-        for (int i = 0; i < n; i++) if (TARGETS[i] == r->target_score) cur = i;
-        r->target_score = TARGETS[(cur + n + dir) % n];
+    case OPT_TARGET:
+        r->target_score = cycle_target(r->target_score, dir);
         break;
-    }
     default:
         break;
     }
@@ -448,7 +455,9 @@ static const char* notice_text(const char* code) {
         {"no_room",   "THAT ROOM IS GONE"},
         {"full",      "THAT ROOM IS FULL"},
         {"started",   "THAT GAME HAS ALREADY STARTED"},
-        {"rate",      "TOO MANY TRIES - WAIT A MINUTE"},
+        {"rate",      "TOO MANY TRIES - TRY AGAIN LATER"},
+        {"busy",      "THE SERVER IS FULL - TRY AGAIN SOON"},
+        {"bad_rules", "THOSE ROOM SETTINGS ARE NOT ALLOWED"},
         {"no_seat",   "THAT GAME HAS ENDED"},
         {"idle",      "YOU WERE MOVED OUT FOR NOT BEING READY"},
         {"closed",    "THE ROOM CLOSED"},
@@ -528,6 +537,70 @@ static void online_view(const AppCtx* c, OnlineView* v) {
     v->notice = online_notice_line(c);
 }
 
+// --- New Room -----------------------------------------------------------------
+// What the next room is made with. These are the room's own settings, kept
+// apart from the Options screen (which is for games against the CPU) and
+// remembered between launches, so the screen opens as it was last left.
+static NgRoomSetup s_room;
+static bool s_room_ready = false;
+
+static NgRoomSetup* current_room(void) {
+    if (!s_room_ready) {
+        s_room = netgame_room_default();
+        int seats, target;
+        bool bonus, partners;
+        if (prefs_room(&seats, &target, &bonus, &partners)) {
+            s_room = (NgRoomSetup){ .seats = seats, .target = target,
+                                    .bonus = bonus, .partners = partners };
+        }
+        netgame_room_normalize(&s_room);   // a hand-edited file can hold anything
+        s_room_ready = true;
+    }
+    return &s_room;
+}
+
+// The New Room screen's rows: the four settings, then Create Room and Back.
+enum { NR_SEATS, NR_TARGET, NR_BONUS, NR_PARTNERS, NR_CREATE, NR_BACK, NR_ITEMS };
+
+static int build_new_room(const char* labels[]) {
+    static char buf[NR_ITEMS][32];
+    const NgRoomSetup* rs = current_room();
+    snprintf(buf[NR_SEATS],    sizeof buf[0], "Seats: %d", rs->seats);
+    snprintf(buf[NR_TARGET],   sizeof buf[0], "Play To: %d", rs->target);
+    snprintf(buf[NR_BONUS],    sizeof buf[0], "Bonus Scoring: %s", rs->bonus ? "On" : "Off");
+    snprintf(buf[NR_PARTNERS], sizeof buf[0], "Partners: %s", rs->partners ? "On" : "Off");
+    snprintf(buf[NR_CREATE],   sizeof buf[0], "Create Room");
+    snprintf(buf[NR_BACK],     sizeof buf[0], "Back");
+    for (int i = 0; i < NR_ITEMS; i++) labels[i] = buf[i];
+    return NR_ITEMS;
+}
+
+// Cycle one room setting by `dir` (+1 / -1). Partners is a four-player game,
+// so turning it on takes all four seats, and fewer seats turn it off.
+static void cycle_room(int item, int dir) {
+    NgRoomSetup* rs = current_room();
+    switch (item) {
+    case NR_SEATS:
+        rs->seats += dir;
+        if (rs->seats > RULES_SEATS_MAX) rs->seats = RULES_SEATS_MIN;
+        if (rs->seats < RULES_SEATS_MIN) rs->seats = RULES_SEATS_MAX;
+        break;
+    case NR_TARGET:
+        rs->target = cycle_target(rs->target, dir);
+        break;
+    case NR_BONUS:
+        rs->bonus = !rs->bonus;
+        break;
+    case NR_PARTNERS:
+        rs->partners = !rs->partners;
+        if (rs->partners) rs->seats = RULES_SEATS_MAX;
+        break;
+    default:
+        break;
+    }
+    netgame_room_normalize(rs);
+}
+
 // The two small menus over a live match.
 #define GAME_MENU_ITEMS 3
 static const char* const GAME_MENU_LABELS[GAME_MENU_ITEMS] = {
@@ -557,13 +630,53 @@ static void activate_list_row(AppCtx* c, const OlRow* row) {
         netgame_rejoin(ng, prefs_seat_key());
         break;
     case OLR_NEW:
-        // The room's rules are the Options screen's, fixed for its life.
-        netgame_create(ng, current_options());
+        // The room's settings are chosen on its own screen, fixed for its
+        // life. The cursor starts on Create Room, so a second press makes a
+        // room just like the last one.
+        c->ol_screen = OS_NEW_ROOM;
+        c->ol_sel = NR_CREATE;
         break;
     case OLR_ROOM:
         c->ol_last_room = ng->rooms[row->room].id;
         netgame_join_room(ng, c->ol_last_room);
         break;
+    }
+}
+
+// Leave the New Room screen for the room list, with the cursor back on the
+// New Room row, remembering the settings as they were left.
+static void new_room_close(AppCtx* c) {
+    const NgRoomSetup* rs = current_room();
+    prefs_set_room(rs->seats, rs->target, rs->bonus, rs->partners);
+    prefs_save();
+    c->ol_screen = OS_LIST;
+    c->ol_sel = prefs_seat_key()[0] ? 1 : 0;   // New Room follows Return to Game
+}
+
+// The New Room screen: Left/Right (or a tap, or Select) cycles a setting;
+// Create Room makes the room with what is shown.
+static void new_room_input(AppCtx* c, const Input* in) {
+    if (c->ol_sel < 0 || c->ol_sel >= NR_ITEMS) c->ol_sel = NR_CREATE;
+    if (in->escape_pressed) { new_room_close(c); return; }
+    if (in->menu_up)   { c->ol_sel = (c->ol_sel + NR_ITEMS - 1) % NR_ITEMS; sound_play(SFX_MENU_MOVE); }
+    if (in->menu_down) { c->ol_sel = (c->ol_sel + 1) % NR_ITEMS; sound_play(SFX_MENU_MOVE); }
+    int dir = (in->menu_right ? 1 : 0) - (in->menu_left ? 1 : 0);
+    bool select = in->select_pressed;
+    Vector2 p;
+    if (pointer_tap(in, &p)) {
+        int hit = menu_hit_test(p);
+        if (hit >= 0 && hit < NR_ITEMS) { c->ol_sel = hit; select = true; }
+    }
+    if (select && c->ol_sel == NR_BACK) {
+        sound_play(SFX_MENU_SELECT);
+        new_room_close(c);
+    } else if (select && c->ol_sel == NR_CREATE) {
+        sound_play(SFX_MENU_SELECT);
+        new_room_close(c);
+        netgame_create(&c->net, current_room());
+    } else if (c->ol_sel < NR_CREATE && (dir != 0 || select)) {
+        cycle_room(c->ol_sel, dir ? dir : 1);
+        sound_play(SFX_MENU_SELECT);
     }
 }
 
@@ -702,7 +815,7 @@ static void online_frame(AppCtx* c, const Input* in, double dt) {
         c->ol_prev = ng->state;
     }
     // Back on the list after leaving a room: the cursor lands on it.
-    if (ng->state == NG_IDLE && c->ol_last_room && ng->have_rooms) {
+    if (ng->state == NG_IDLE && c->ol_screen == OS_LIST && c->ol_last_room && ng->have_rooms) {
         OnlineView v;
         online_view(c, &v);
         OlRow rows[OL_MAX_ROWS];
@@ -733,7 +846,8 @@ static void online_frame(AppCtx* c, const Input* in, double dt) {
         if (in->escape_pressed) online_leave_to_menu(c);
         break;
     case NG_IDLE:
-        online_list_input(c, in);
+        if (c->ol_screen == OS_NEW_ROOM) new_room_input(c, in);
+        else online_list_input(c, in);
         break;
     case NG_LOBBY:
         online_lobby_input(c, in);
@@ -788,6 +902,12 @@ static void render_online(AppCtx* c) {
     OnlineView v;
     switch (ng->state) {
     case NG_IDLE:
+        if (c->ol_screen == OS_NEW_ROOM) {
+            const char* nr_labels[NR_ITEMS];
+            int nr_count = build_new_room(nr_labels);
+            render_menu("NEW ROOM", nr_labels, nr_count, c->ol_sel, NR_CREATE);
+            break;
+        }
         online_view(c, &v);
         online_render_list(&v);
         c->ol_scroll = v.scroll;
