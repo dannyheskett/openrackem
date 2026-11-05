@@ -8,7 +8,8 @@
 
 // Rules and state for a rack-sorting card game. Pure and allocation-free after
 // create: no rendering, no raylib, no rand(). All randomness comes from the
-// seeded xorshift64* state in Game.rng, so a match is fully reproducible from
+// seed — the deals from a keystream keyed by it, the AI's dice from a state
+// derived from it (Game.rng) — so a match is fully reproducible from
 // (seed, Rules, action list). The struct is a flat POD with no pointers; a
 // snapshot is a memcpy (see GAME_SERIAL_SIZE).
 
@@ -76,7 +77,9 @@ typedef struct {
 // --- State -----------------------------------------------------------------
 typedef struct {
     Rules   rules;                // normalized at create; never read from globals
-    uint64_t rng;                 // xorshift64* state; the ONLY randomness source
+    uint64_t rng;                 // xorshift64* state for the AI's dice (Easy's
+                                  // fumbles). The cards never come from it: see
+                                  // `deals` and the deal stream in game.c.
     Player  players[MAX_PLAYERS];
     uint8_t stock[MAX_CARDS];     // stock[0] is the top
     uint8_t stock_count;
@@ -95,6 +98,9 @@ typedef struct {
     uint8_t last_taken[MAX_PLAYERS];     // last card each seat took off the discard
                                          // pile this round, 0 = none (public info)
     uint16_t round_points[MAX_PLAYERS];  // what each seat scored last round
+    uint32_t deals;               // deals so far this match: with the seed, the
+                                  // whole input to the next shuffle (public; it
+                                  // is the round count, and never saturates)
     unsigned events;              // EV_* flags for this step, cleared each step
     /* presentation-only, excluded from the serialized form */
     Anim    anim;

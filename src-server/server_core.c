@@ -18,6 +18,7 @@
 #define RATE_REFILL_MS   10     // ...refilling 1 per this many ms (~100 msg/s)
 #define IPCAP_WINDOW_MS  600000 // per-IP room-create budget window...
 #define IPCAP_MAX        30     // ...and how many creates it allows
+#define IPJOIN_MAX       60     // ...and how many joins (browsing in and out)
 #define ALOG_CAP         2048   // audit action log per match (then truncated)
 #define ALOG_NEXT_ROUND  0xFF   // pseudo-action marking a round advance
 #define NAME_CAP         16     // display name buffer (15 chars + NUL)
@@ -53,12 +54,14 @@ typedef struct {
     uint8_t  strikes;     // consecutive turn timeouts
     bool     confirmed;   // round-over confirmation
     int64_t  gone_ms;     // waiting room: when the link dropped (grace)
+    int64_t  unready_since; // waiting room: not ready since (0 = ready)
 } Member;
 
 typedef struct {
     bool     active;
     uint8_t  phase;           // PHASE_LOBBY / PHASE_PLAYING
     bool     can_force;       // "Start without them" offered
+    uint8_t  seats;           // capacity, 2..4 (fixed at creation)
     uint16_t gen;             // bumps on every reuse of this slot
     uint16_t matches;         // matches played to the end in this room
     Rules    rules;           // room settings (fixed at creation); player_count set at deal
@@ -74,7 +77,6 @@ typedef struct {
     int64_t  wait_deadline;   // ...until then
     int64_t  empty_since;     // playing, nobody present: since when
     int64_t  created_ms;
-    int64_t  last_used_ms;    // last deal / move / match end
     uint32_t rev;             // bumps on any change a viewer can see
     uint32_t actions;
     uint8_t  alog[ALOG_CAP];
@@ -90,6 +92,7 @@ typedef struct {
     int      room, member;   // valid when CL_ROOM
     char     ip[46];
     char     name[NAME_CAP]; // from hello
+    bool     refused;        // over the per-address cap: being closed, ignored
     int      tokens;         // rate bucket
     int64_t  bucket_ms;
     int64_t  last_msg_ms;    // silence detection
@@ -112,7 +115,8 @@ struct Srv {
     uint64_t rng;
     Room     rooms[SRV_MAX_ROOMS];
     Client   clients[SRV_MAX_CLIENTS];
-    IpCap    ipcap[256];
+    IpCap    ipcap[256];      // room creates per address
+    IpCap    ipjoin[256];     // room joins per address
     uint32_t list_gen;       // bumps whenever the room list may have changed
     int64_t  boot_ms;
     bool     boot_set;
@@ -157,12 +161,39 @@ static void logf_line(Srv* s, const char* fmt, ...) {
     if (n > 0) s->io.log(s->io.ud, buf);
 }
 
+// Secret bytes: member keys and match seeds. From the transport's entropy
+// source when there is one (always, in the daemon). The seeded generator below
+// it is the unit tests' deterministic stand-in and nothing else: its whole
+// state can be computed from any value it hands out, so a key drawn from it
+// would give its holder every later key and seed.
+static void fill_random(Srv* s, uint8_t* out, size_t n) {
+    if (s->io.entropy) {
+        s->io.entropy(s->io.ud, out, n);
+        return;
+    }
+    for (size_t i = 0; i < n; i += 8) {
+        uint64_t v = rng_next64(&s->rng);
+        for (size_t k = 0; k < 8 && i + k < n; k++) out[i + k] = (uint8_t)(v >> (k * 8));
+    }
+}
+
 static void make_token(Srv* s, char out[33]) {
     static const char HEX[] = "0123456789abcdef";
-    uint64_t a = rng_next64(&s->rng), b = rng_next64(&s->rng);
-    for (int i = 0; i < 16; i++) out[i]      = HEX[(a >> (i * 4)) & 15];
-    for (int i = 0; i < 16; i++) out[16 + i] = HEX[(b >> (i * 4)) & 15];
+    uint8_t raw[16];
+    fill_random(s, raw, sizeof raw);
+    for (int i = 0; i < 16; i++) {
+        out[i * 2]     = HEX[raw[i] >> 4];
+        out[i * 2 + 1] = HEX[raw[i] & 15];
+    }
     out[32] = '\0';
+}
+
+static uint64_t make_seed(Srv* s) {
+    uint8_t raw[8];
+    fill_random(s, raw, sizeof raw);
+    uint64_t v = 0;
+    for (int i = 0; i < 8; i++) v |= (uint64_t)raw[i] << (i * 8);
+    return v ? v : 1;   // the engine reserves 0 for "unseeded"
 }
 
 static int room_id(const Srv* s, int r) {
@@ -182,6 +213,12 @@ static int member_count(const Room* rm) {
     int n = 0;
     for (int i = 0; i < MAX_PLAYERS; i++) n += rm->m[i].used;
     return n;
+}
+
+// The room's capacity. Every room is made with one; the fallback only guards
+// a zeroed slot.
+static int room_seats(const Room* rm) {
+    return (rm->seats >= 2 && rm->seats <= MAX_PLAYERS) ? rm->seats : MAX_PLAYERS;
 }
 
 static bool member_present(const Member* mb) {
@@ -251,9 +288,9 @@ static IpCap* ip_bucket(IpCap* table, const char* ip, int64_t now, int64_t windo
     return c;
 }
 
-static bool ip_allow_create(Srv* s, const char* ip, int64_t now) {
-    IpCap* c = ip_bucket(s->ipcap, ip, now, IPCAP_WINDOW_MS);
-    if (c->count >= IPCAP_MAX) return false;
+static bool ip_allow(IpCap* table, int max, const char* ip, int64_t now) {
+    IpCap* c = ip_bucket(table, ip, now, IPCAP_WINDOW_MS);
+    if (c->count >= max) return false;
     c->count++;
     return true;
 }
@@ -294,9 +331,10 @@ static void emit_lobby(Srv* s, Room* rm, int r, int mi, int64_t now) {
     int64_t cd = rm->countdown_at ? rm->countdown_at - now : -1;
     if (rm->countdown_at && cd < 0) cd = 0;
     jw_f(&w, "{\"t\":\"lobby\",\"v\":%d,\"id\":%d,\"target\":%d,\"bonus\":%d,"
-             "\"partners\":%d,\"games\":%d,\"me\":%d,",
+             "\"partners\":%d,\"seats\":%d,\"games\":%d,\"me\":%d,",
         SRV_PROTO_VERSION, room_id(s, r), rm->rules.target_score,
-        rm->rules.bonus_scoring ? 1 : 0, rm->rules.partners ? 1 : 0, rm->matches, mi);
+        rm->rules.bonus_scoring ? 1 : 0, rm->rules.partners ? 1 : 0, room_seats(rm),
+        rm->matches, mi);
     jw_names(&w, rm);
     jw_f(&w, ",\"used\":[");
     for (int i = 0; i < MAX_PLAYERS; i++) jw_f(&w, "%s%d", i ? "," : "", rm->m[i].used);
@@ -586,7 +624,6 @@ static void return_to_lobby(Srv* s, int r, int64_t now) {
     rm->empty_since = 0;
     rm->countdown_at = rm->idle_since = 0;
     rm->can_force = false;
-    rm->last_used_ms = now;
     for (int i = 0; i < MAX_PLAYERS; i++) rm->seat_member[i] = -1;
     for (int i = 0; i < MAX_PLAYERS; i++) {
         Member* mb = &rm->m[i];
@@ -596,6 +633,7 @@ static void return_to_lobby(Srv* s, int r, int64_t now) {
             continue;
         }
         mb->ready = false;
+        mb->unready_since = 0;                   // the not-ready clock starts over
         mb->seat = -1;
         mb->away = false;
         mb->ai_control = false;
@@ -643,8 +681,7 @@ static void start_match(Srv* s, int r, int64_t now) {
     rules.player_count = n;
     rules.human_seat = 0;        // engine-side flag; the server drives all AI itself
     rules.ai_difficulty = 1;     // stand-ins play at the middle tier
-    rules.seed = rng_next64(&s->rng);
-    if (rules.seed == 0) rules.seed = 1;
+    rules.seed = make_seed(s);
     rules_normalize(&rules);
 
     for (int seat = 0; seat < n; seat++) {
@@ -667,7 +704,6 @@ static void start_match(Srv* s, int r, int64_t now) {
     rm->actions = 0;
     rm->alog_len = 0;
     rm->alog_full = false;
-    rm->last_used_ms = now;
     game_init(&rm->g, &rules);
     drive_deal(rm);
     touch(s, rm);
@@ -685,6 +721,11 @@ static void lobby_changed(Srv* s, int r, int64_t now) {
     if (!rm->active || rm->phase != PHASE_LOBBY) return;
     int present = 0;
     const char* block = lobby_block(rm, &present);
+    // Once the countdown runs, the room is committed: nobody can join and
+    // nobody can un-ready (see the join/ready/team handlers), so the only
+    // thing that stops it is the table no longer being playable — too few
+    // players left, or a Partners side short. Anything softer would let one
+    // member hold a room in the waiting room for as long as they liked.
     if (block[0] == '\0') {
         if (!rm->countdown_at) rm->countdown_at = now + SRV_COUNTDOWN_MS;
     } else {
@@ -710,7 +751,6 @@ static void lobby_changed(Srv* s, int r, int64_t now) {
 static void applied_action(Srv* s, Room* rm, int seat, Action a, int card_pub,
                            int64_t now) {
     rm->actions++;
-    rm->last_used_ms = now;
     alog_push(rm, (uint8_t)((a.type & 0x3) | (a.slot << 2)));
     s->dirty = true;
     schedule(s, rm, now);
@@ -937,8 +977,9 @@ static void switch_team(Room* rm, int mi) {
 // --- Room list ---------------------------------------------------------------
 static bool room_joinable(const Room* rm) {
     if (!rm->active || rm->phase != PHASE_LOBBY) return false;
+    if (rm->countdown_at) return false;   // starting: closed to arrivals
     int n = member_count(rm);
-    return n >= 1 && n < MAX_PLAYERS;
+    return n >= 1 && n < room_seats(rm);
 }
 
 // Every joinable room, fullest first then newest, up to SRV_LIST_SHOW.
@@ -974,6 +1015,8 @@ static void push_rooms(Srv* s, int client, int64_t now) {
     for (int i = 0; i < n; i++) jw_f(&w, "%s%d", i ? "," : "", s->rooms[idx[i]].rules.bonus_scoring ? 1 : 0);
     jw_f(&w, "],\"partners\":[");
     for (int i = 0; i < n; i++) jw_f(&w, "%s%d", i ? "," : "", s->rooms[idx[i]].rules.partners ? 1 : 0);
+    jw_f(&w, "],\"seats\":[");
+    for (int i = 0; i < n; i++) jw_f(&w, "%s%d", i ? "," : "", room_seats(&s->rooms[idx[i]]));
     jw_f(&w, "],\"names\":[");
     for (int i = 0; i < n; i++) {
         const Room* rm = &s->rooms[idx[i]];
@@ -1035,6 +1078,18 @@ void srv_client_connected(Srv* s, int client, const char* ip) {
     c->room = c->member = -1;
     c->tokens = RATE_BURST;
     snprintf(c->ip, sizeof c->ip, "%s", ip ? ip : "?");
+
+    // One address may not take every slot. Over the cap the newcomer is told
+    // the server is busy and closed; nothing it sends meanwhile is read.
+    int same = 0;
+    for (int i = 0; i < SRV_MAX_CLIENTS; i++) {
+        if (i != client && s->clients[i].used && strcmp(s->clients[i].ip, c->ip) == 0) same++;
+    }
+    if (same >= SRV_IP_MAX_CONNS) {
+        c->refused = true;
+        send_error(s, client, "busy");
+        s->io.kick(s->io.ud, client);
+    }
 }
 
 void srv_client_gone(Srv* s, int client, int64_t now_ms) {
@@ -1083,6 +1138,10 @@ static bool try_rejoin(Srv* s, int client, const char* key, int64_t now) {
     c->listing = false;
     send_welcome(s, r, mi);
     if (rm->phase == PHASE_LOBBY) {
+        // Back during the countdown: they are dealt in with everyone else. (A
+        // link that drops and returns comes back not ready, and if that could
+        // stop a countdown, dropping and returning would be a way to stall.)
+        if (rm->countdown_at) mb->ready = true;
         lobby_changed(s, r, now);
     } else {
         member_back(s, r, mi, now);
@@ -1090,13 +1149,10 @@ static bool try_rejoin(Srv* s, int client, const char* key, int64_t now) {
     return true;
 }
 
-static int parse_target(long t) {
-    return (t >= 50 && t <= 1000) ? (int)t : 500;
-}
-
 void srv_client_msg(Srv* s, int client, const char* text, size_t len, int64_t now) {
     if (!client_ok(s, client)) return;
     Client* c = &s->clients[client];
+    if (c->refused) return;
     c->last_msg_ms = now;
 
     // Per-connection rate bucket: refill, then spend. Overdraft closes.
@@ -1163,12 +1219,23 @@ void srv_client_msg(Srv* s, int client, const char* text, size_t len, int64_t no
         }
 
         if (strcmp(t, "create") == 0) {
-            if (!ip_allow_create(s, c->ip, now)) { send_error(s, client, "rate"); return; }
+            // The room's settings, checked before anything is spent on them.
+            // A request the room could not honor is refused, never quietly
+            // turned into something else: what the waiting room shows is what
+            // was asked for. (Wire ints are non-negative and below 10^9.)
+            long target = wire_int(kv, n, "target", 500);
+            long seats = wire_int(kv, n, "seats", MAX_PLAYERS);
+            bool partners = wire_int(kv, n, "partners", 0) != 0;
+            if (!rules_room_valid((int)seats, (int)target, partners)) {
+                send_error(s, client, "bad_rules");
+                return;
+            }
             int r = -1;
             for (int i = 0; i < SRV_MAX_ROOMS; i++) {
                 if (!s->rooms[i].active) { r = i; break; }
             }
-            if (r < 0) { send_error(s, client, "full"); return; }
+            if (r < 0) { send_error(s, client, "busy"); return; }
+            if (!ip_allow(s->ipcap, IPCAP_MAX, c->ip, now)) { send_error(s, client, "rate"); return; }
             surrender_key(s, wire_str(kv, n, "key"), now);
             Room* rm = &s->rooms[r];
             uint16_t gen = rm->gen;
@@ -1177,15 +1244,16 @@ void srv_client_msg(Srv* s, int client, const char* text, size_t len, int64_t no
             rm->active = true;
             rm->phase = PHASE_LOBBY;
             rm->wait_seat = -1;
-            rm->created_ms = rm->last_used_ms = now;
+            rm->created_ms = now;
+            rm->seats = (uint8_t)seats;
             for (int i = 0; i < MAX_PLAYERS; i++) {
                 rm->seat_member[i] = -1;
                 rm->m[i].seat = -1;
             }
             rm->rules = rules_default();
             rm->rules.bonus_scoring = wire_int(kv, n, "bonus", 0) != 0;
-            rm->rules.partners = wire_int(kv, n, "partners", 0) != 0;
-            rm->rules.target_score = parse_target(wire_int(kv, n, "target", 500));
+            rm->rules.partners = partners;
+            rm->rules.target_score = (int)target;
             int mi = add_member(s, r, client);
             logf_line(s, "create room=%d", r);
             send_welcome(s, r, mi);
@@ -1197,8 +1265,14 @@ void srv_client_msg(Srv* s, int client, const char* text, size_t len, int64_t no
             int r = room_from_id(s, wire_int(kv, n, "room", -1));
             if (r < 0) { send_error(s, client, "no_room"); return; }
             Room* rm = &s->rooms[r];
-            if (rm->phase != PHASE_LOBBY) { send_error(s, client, "started"); return; }
-            if (member_count(rm) >= MAX_PLAYERS) { send_error(s, client, "full"); return; }
+            // A room that is counting down has started as far as an arrival
+            // is concerned (and is off the list): see lobby_changed.
+            if (rm->phase != PHASE_LOBBY || rm->countdown_at) {
+                send_error(s, client, "started");
+                return;
+            }
+            if (member_count(rm) >= room_seats(rm)) { send_error(s, client, "full"); return; }
+            if (!ip_allow(s->ipjoin, IPJOIN_MAX, c->ip, now)) { send_error(s, client, "rate"); return; }
             surrender_key(s, wire_str(kv, n, "key"), now);
             if (!s->rooms[r].active) { send_error(s, client, "no_room"); return; }
             int mi = add_member(s, r, client);
@@ -1230,11 +1304,14 @@ void srv_client_msg(Srv* s, int client, const char* text, size_t len, int64_t no
             return;
         }
         if (strcmp(t, "ready") == 0) {
-            me->ready = wire_int(kv, n, "on", 1) != 0;
+            bool on = wire_int(kv, n, "on", 1) != 0;
+            if (!on && rm->countdown_at) return;   // committed: Leave is the way out
+            me->ready = on;
             lobby_changed(s, r, now);
             return;
         }
         if (strcmp(t, "team") == 0) {
+            if (rm->countdown_at) return;          // as above
             if (rm->rules.partners) switch_team(rm, mi);
             lobby_changed(s, r, now);
             return;
@@ -1350,6 +1427,24 @@ void srv_tick(Srv* s, int64_t now) {
                 }
             }
             if (!rm->active) continue;
+            // A member who sits not ready is moved out after a while, so a
+            // room someone walked away from doesn't stay on the list as a
+            // table nobody can start. Ready is the sign of someone waiting:
+            // a ready player may hold a room for as long as they like. The
+            // clock runs only while connected (a dropped link has the grace
+            // above) and restarts on every return.
+            for (int i = 0; i < MAX_PLAYERS && rm->active; i++) {
+                Member* mb = &rm->m[i];
+                if (!mb->used || !mb->connected || mb->ready) {
+                    mb->unready_since = 0;
+                } else if (!mb->unready_since) {
+                    mb->unready_since = now;
+                } else if (now - mb->unready_since > SRV_LOBBY_UNREADY_MS) {
+                    remove_member(s, r, i, "idle", now);
+                    if (rm->active) lobby_changed(s, r, now);
+                }
+            }
+            if (!rm->active) continue;
             if (rm->idle_since && !rm->can_force && now - rm->idle_since > SRV_IDLE_READY_MS) {
                 rm->can_force = true;
                 broadcast_lobby(s, r, now);
@@ -1422,7 +1517,10 @@ void srv_status_json(Srv* s, char* out, size_t cap, int64_t now) {
 
 // --- Persistence ---------------------------------------------------------------
 #define SNAP_MAGIC   0x4F525331u   // "ORS1"
-#define SNAP_VERSION 2u            // v2: one room kind (protocol 3)
+#define SNAP_VERSION 3u            // v3: seats, the not-ready clock, the
+                                   // engine's deal counter; and no room keeps
+                                   // a key, seed or deck from the old
+                                   // generators (v2: one room kind)
 
 typedef struct {
     uint32_t magic, version, room_size, count;
@@ -1491,7 +1589,6 @@ bool srv_restore(Srv* s, const uint8_t* buf, size_t len, int64_t now) {
         rm->wait_deadline = 0;
         rm->empty_since = 0;
         rm->created_ms = rebase(rm->created_ms, delta);
-        rm->last_used_ms = rebase(rm->last_used_ms, delta);
         for (int i = 0; i < MAX_PLAYERS; i++) {
             Member* mb = &rm->m[i];
             if (!mb->used) continue;
@@ -1503,6 +1600,7 @@ bool srv_restore(Srv* s, const uint8_t* buf, size_t len, int64_t now) {
                 mb->ready = false;
                 mb->gone_ms = now;
             }
+            mb->unready_since = 0;
         }
         if (rm->phase == PHASE_PLAYING) schedule(s, rm, now);
         restored++;

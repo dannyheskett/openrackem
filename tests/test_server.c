@@ -144,10 +144,31 @@ static Srv* S;
 static int64_t NOW;
 
 static Srv* fresh_server(void) {
-    SrvIo io = {t_send, t_kick, t_log, NULL};
+    SrvIo io = {t_send, t_kick, t_log, NULL, NULL};   // no entropy: the seeded generator
     cap_reset();
     s_logs_n = 0;
     NOW = 1000000;
+    S = srv_create(&io, 0xC0FFEE);
+    return S;
+}
+
+// A stand-in for the operating system's random source: a known byte stream
+// (1, 2, 3, ...) and a count of what was asked for.
+static uint8_t s_ent_next;
+static size_t  s_ent_bytes;
+static void t_entropy(void* ud, uint8_t* out, size_t n) {
+    (void)ud;
+    for (size_t i = 0; i < n; i++) out[i] = ++s_ent_next;
+    s_ent_bytes += n;
+}
+
+static Srv* fresh_server_entropy(void) {
+    SrvIo io = {t_send, t_kick, t_log, NULL, t_entropy};
+    cap_reset();
+    s_logs_n = 0;
+    NOW = 1000000;
+    s_ent_next = 0;
+    s_ent_bytes = 0;
     S = srv_create(&io, 0xC0FFEE);
     return S;
 }
@@ -442,19 +463,30 @@ static void test_lobby_ready(void) {
     jstr(lob, "block", block, sizeof block);
     CHECK(strcmp(block, "ready") == 0);
 
-    // Both ready: the countdown arms. A third arrival cancels it.
+    // Both ready: the countdown arms, and the room is committed. A third
+    // arrival is turned away as if the game had begun, and an un-ready is
+    // ignored.
     ready(1);
     CHECK(rm->countdown_at != 0);
     CHECK(jfield(last_msg(1, "lobby"), "count_ms") > 0);
     join_id(2, id_of(0));
-    CHECK(rm->countdown_at == 0);
+    jstr(last_msg(2, "error"), "code", block, sizeof block);
+    CHECK(strcmp(block, "started") == 0);
+    CHECK(rm->countdown_at != 0 && member_count(rm) == 2);
+    say(1, "{\"t\":\"ready\",\"on\":0}");
+    CHECK(rm->countdown_at != 0 && rm->m[1].ready);
 
-    // Un-ready cancels too; re-ready re-arms; the deal happens on time.
+    // Leave is the way out, and it stops the countdown when too few are left.
+    // The room reopens; a third player gets in before anyone is counting
+    // down, and the deal happens on time.
+    say(1, "{\"t\":\"leave\"}");
+    CHECK(rm->countdown_at == 0 && member_count(rm) == 1);
+    join_id(1, id_of(0));
+    join_id(2, id_of(0));
+    CHECK(member_count(rm) == 3 && rm->countdown_at == 0);
+    ready(1);
     ready(2);
     CHECK(rm->countdown_at != 0);
-    say(1, "{\"t\":\"ready\",\"on\":0}");
-    CHECK(rm->countdown_at == 0);
-    ready(1);
     tick_ms(SRV_COUNTDOWN_MS - 500);
     CHECK(rm->phase == PHASE_LOBBY);
     tick_ms(600);
@@ -486,10 +518,27 @@ static void test_rules_fixed(void) {
     jstr(last_msg(0, "error"), "code", err, sizeof err);
     CHECK(strcmp(err, "bad_msg") == 0);
     CHECK(rm->rules.target_score == 1000);
-    // Out-of-range targets at creation clamp to the default.
+    // A request the room can't honor is refused outright, never adjusted:
+    // no room is made, and nothing of the per-address budget is spent.
     hello(2, "3.3.3.3", "Cy");
-    int r2 = create(2, "\"target\":7");
-    CHECK(S->rooms[r2].rules.target_score == 500);
+    static const char* const bad[] = {
+        "\"target\":7", "\"target\":49", "\"target\":1001", "\"seats\":1",
+        "\"seats\":5", "\"seats\":0", "\"partners\":1,\"seats\":3",
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        int before = s_sent_n;
+        CHECK(create(2, bad[i]) == -1);
+        CHECK(count_msgs(2, "error", before) == 1);
+        jstr(last_msg(2, "error"), "code", err, sizeof err);
+        CHECK(strcmp(err, "bad_rules") == 0);
+        CHECK(S->clients[2].state == CL_IDLE && last_msg(2, "welcome") == NULL);
+    }
+    // The ends of the range are fine.
+    int r2 = create(2, "\"target\":50");
+    CHECK(r2 >= 0 && S->rooms[r2].rules.target_score == 50);
+    hello(3, "4.4.4.4", "Dee");
+    int r3 = create(3, "\"target\":1000,\"seats\":2");
+    CHECK(r3 >= 0 && S->rooms[r3].rules.target_score == 1000 && S->rooms[r3].seats == 2);
 }
 
 // --- Leaving the waiting room, grace, deletion ---------------------------------
@@ -580,13 +629,22 @@ static void test_partners(void) {
 
     // Both teams full: Switch Team trades you with the other side's most
     // recent member, and both have to ready again.
-    for (int i = 0; i < 4; i++) ready(i);
+    ready(0);
+    ready(1);
+    ready(3);
     say(0, "{\"t\":\"team\"}");
     CHECK(rm->m[0].team == 1 && rm->m[3].team == 0);
     CHECK(rm->m[1].team == 1 && rm->m[2].team == 0);
-    CHECK(!rm->m[0].ready && !rm->m[3].ready && rm->m[1].ready && rm->m[2].ready);
+    CHECK(!rm->m[0].ready && !rm->m[3].ready && rm->m[1].ready);
     jstr(last_msg(2, "lobby"), "block", block, sizeof block);
     CHECK(strcmp(block, "ready") == 0);
+
+    // Everyone ready: the countdown runs, and Switch Team no longer does
+    // anything (it would un-ready two players and stop the start).
+    for (int i = 0; i < 4; i++) ready(i);
+    CHECK(rm->countdown_at != 0);
+    say(1, "{\"t\":\"team\"}");
+    CHECK(rm->m[1].team == 1 && rm->m[1].ready && rm->countdown_at != 0);
 
     // Start: partners sit opposite (team A in seats 0 and 2).
     ready_all_and_start(cl, 4);
@@ -705,12 +763,6 @@ static void test_idle_not_ready(void) {
     CHECK(room_of(2) == r);                             // nobody removed
     CHECK(jfield(last_msg(0, "lobby"), "force") == 1);
     CHECK(jfield(last_msg(2, "lobby"), "force") == 0);  // only ready players see it
-    // The idle player readying up withdraws the offer.
-    ready(2);
-    CHECK(!S->rooms[r].can_force);
-    say(2, "{\"t\":\"ready\",\"on\":0}");
-    tick_ms(SRV_IDLE_READY_MS + 1000);
-    CHECK(S->rooms[r].can_force);
     say(2, "{\"t\":\"force\"}");                         // not from the idle one
     CHECK(room_of(2) == r);
     say(0, "{\"t\":\"force\"}");
@@ -720,6 +772,337 @@ static void test_idle_not_ready(void) {
     CHECK(strcmp(why, "idle") == 0);
     tick_ms(SRV_COUNTDOWN_MS + 10);
     CHECK(S->rooms[r].phase == PHASE_PLAYING && S->rooms[r].g.rules.player_count == 2);
+
+    // The idle player readying up instead withdraws the offer and starts the
+    // countdown, which they can't then take back: the three are dealt.
+    fresh_server();
+    hello(0, "1.1.1.1", "Ann");
+    hello(1, "2.2.2.2", "Bob");
+    hello(2, "3.3.3.3", "Idle");
+    r = create(0, "");
+    join_id(1, id_of(0));
+    join_id(2, id_of(0));
+    ready(0);
+    ready(1);
+    tick_ms(SRV_IDLE_READY_MS + 1000);
+    CHECK(S->rooms[r].can_force);
+    ready(2);
+    CHECK(!S->rooms[r].can_force && S->rooms[r].countdown_at != 0);
+    say(2, "{\"t\":\"ready\",\"on\":0}");
+    CHECK(S->rooms[r].countdown_at != 0);
+    tick_ms(SRV_COUNTDOWN_MS + 10);
+    CHECK(S->rooms[r].phase == PHASE_PLAYING && S->rooms[r].g.rules.player_count == 3);
+}
+
+// --- Keys and seeds come from the entropy source --------------------------------
+static void test_entropy(void) {
+    fresh_server_entropy();
+    uint64_t rng0 = S->rng;
+    hello(0, "1.1.1.1", "Ann");
+    hello(1, "2.2.2.2", "Bob");
+    CHECK(s_ent_bytes == 0);                            // nothing secret yet
+
+    // A member key is sixteen bytes of it, in hex.
+    int r = create(0, "");
+    char key[40];
+    key_of(0, key);
+    CHECK(s_ent_bytes == 16);
+    CHECK(strcmp(key, "0102030405060708090a0b0c0d0e0f10") == 0);
+    join_id(1, id_of(0));
+    key_of(1, key);
+    CHECK(s_ent_bytes == 32);
+    CHECK(strcmp(key, "1112131415161718191a1b1c1d1e1f20") == 0);
+
+    // A match seed is eight more.
+    int cl[2] = {0, 1};
+    ready_all_and_start(cl, 2);
+    CHECK(S->rooms[r].phase == PHASE_PLAYING);
+    CHECK(s_ent_bytes == 40);
+    CHECK(S->rooms[r].g.rules.seed == 0x2827262524232221ULL);
+
+    // The seeded generator was never consulted: with it idle there is no
+    // state for a key to give away.
+    CHECK(S->rng == rng0);
+}
+
+// --- The countdown can't be held off ----------------------------------------------
+static void test_countdown_lock(void) {
+    char code[16];
+
+    // Joining and leaving, over and over: every attempt during the countdown
+    // is refused, so the table starts on time with the two who readied.
+    fresh_server();
+    hello(0, "1.1.1.1", "Ann");
+    hello(1, "2.2.2.2", "Bob");
+    hello(2, "9.9.9.9", "Troll");
+    hello(3, "8.8.8.8", "Viewer");
+    int r = create(0, "");
+    Room* rm = &S->rooms[r];
+    long id = id_of(0);
+    join_id(1, id);
+    say(3, "{\"t\":\"list\"}");
+    long ids[SRV_LIST_SHOW + 1];
+    CHECK(list_ids(3, ids) == 1 && ids[0] == id);
+    ready(0);
+    ready(1);
+    CHECK(rm->countdown_at != 0);
+    for (int i = 0; i < 6 && rm->phase == PHASE_LOBBY; i++) {
+        tick_ms(SRV_COUNTDOWN_MS / 4);
+        if (rm->phase != PHASE_LOBBY) break;
+        join_id(2, id);
+        jstr(last_msg(2, "error"), "code", code, sizeof code);
+        CHECK(strcmp(code, "started") == 0 && S->clients[2].state == CL_IDLE);
+        say(2, "{\"t\":\"leave\"}");
+    }
+    CHECK(rm->phase == PHASE_PLAYING && rm->g.rules.player_count == 2);
+    // And it was off the list from the moment the countdown began.
+    CHECK(list_ids(3, ids) == 0);
+
+    // Already inside and not ready: leaving lets the others start, and there
+    // is no way back in to stop them.
+    fresh_server();
+    hello(0, "1.1.1.1", "Ann");
+    hello(1, "2.2.2.2", "Bob");
+    hello(2, "9.9.9.9", "Troll");
+    r = create(0, "");
+    rm = &S->rooms[r];
+    id = id_of(0);
+    join_id(1, id);
+    join_id(2, id);
+    ready(0);
+    ready(1);
+    CHECK(rm->countdown_at == 0);
+    say(2, "{\"t\":\"leave\"}");
+    CHECK(rm->countdown_at != 0);
+    join_id(2, id);
+    CHECK(S->clients[2].state == CL_IDLE && rm->countdown_at != 0);
+    tick_ms(SRV_COUNTDOWN_MS + 10);
+    CHECK(rm->phase == PHASE_PLAYING && rm->g.rules.player_count == 2);
+
+    // Ready on, ready off, ready on: the first "on" is binding.
+    fresh_server();
+    hello(0, "1.1.1.1", "Ann");
+    hello(1, "2.2.2.2", "Bob");
+    hello(2, "9.9.9.9", "Troll");
+    r = create(0, "");
+    rm = &S->rooms[r];
+    join_id(1, id_of(0));
+    join_id(2, id_of(0));
+    ready(0);
+    ready(1);
+    for (int i = 0; i < 8 && rm->phase == PHASE_LOBBY; i++) {
+        ready(2);
+        say(2, "{\"t\":\"ready\",\"on\":0}");
+        tick_ms(SRV_COUNTDOWN_MS / 4);
+    }
+    CHECK(rm->phase == PHASE_PLAYING && rm->g.rules.player_count == 3);
+
+    // A link that drops and comes back during the countdown doesn't stop it
+    // either: the returning member is dealt in with everyone else.
+    fresh_server();
+    hello(0, "1.1.1.1", "Ann");
+    hello(1, "2.2.2.2", "Bob");
+    hello(2, "9.9.9.9", "Flaky");
+    r = create(0, "");
+    rm = &S->rooms[r];
+    join_id(1, id_of(0));
+    join_id(2, id_of(0));
+    char key2[40];
+    key_of(2, key2);
+    int all[3] = {0, 1, 2};
+    for (int i = 0; i < 3; i++) ready(all[i]);
+    CHECK(rm->countdown_at != 0);
+    srv_client_gone(S, 2, NOW);
+    CHECK(rm->countdown_at != 0);                       // two are still ready
+    hello(12, "9.9.9.9", "Flaky");
+    sayf(12, "{\"t\":\"rejoin\",\"key\":\"%s\"}", key2);
+    CHECK(room_of(12) == r && rm->countdown_at != 0 && rm->m[2].ready);
+    tick_ms(SRV_COUNTDOWN_MS + 10);
+    CHECK(rm->phase == PHASE_PLAYING && rm->g.rules.player_count == 3);
+}
+
+// --- Seats: a room's capacity -------------------------------------------------------
+static void test_seats(void) {
+    fresh_server();
+    hello(0, "1.1.1.1", "Ann");
+    hello(1, "2.2.2.2", "Bob");
+    hello(2, "3.3.3.3", "Cy");
+    hello(3, "4.4.4.4", "Viewer");
+    char code[16];
+
+    // Not asked for: four, as every room was before the setting existed.
+    int r = create(0, "");
+    CHECK(S->rooms[r].seats == 4);
+    CHECK(jfield(last_msg(0, "lobby"), "seats") == 4);
+    say(0, "{\"t\":\"leave\"}");
+
+    // A two-seat room is listed with its capacity, full at two, and off the
+    // list once it is.
+    r = create(0, "\"seats\":2");
+    Room* rm = &S->rooms[r];
+    long id = id_of(0);
+    CHECK(jfield(last_msg(0, "lobby"), "seats") == 2);
+    say(3, "{\"t\":\"list\"}");
+    long ids[SRV_LIST_SHOW + 1], seats[4];
+    CHECK(list_ids(3, ids) == 1 && ids[0] == id);
+    CHECK(jints(last_msg(3, "rooms"), "seats", seats, 4) == 1 && seats[0] == 2);
+    join_id(1, id);
+    CHECK(member_count(rm) == 2);
+    join_id(2, id);
+    jstr(last_msg(2, "error"), "code", code, sizeof code);
+    CHECK(strcmp(code, "full") == 0 && member_count(rm) == 2);
+    tick_ms(SRV_LIST_PUSH_MS + 10);
+    CHECK(list_ids(3, ids) == 0);
+
+    // A seat that opens up is a seat again.
+    say(1, "{\"t\":\"leave\"}");
+    join_id(2, id);
+    CHECK(member_count(rm) == 2 && room_of(2) == r);
+    int cl[2] = {0, 2};
+    ready_all_and_start(cl, 2);
+    CHECK(rm->phase == PHASE_PLAYING && rm->g.rules.player_count == 2);
+
+    // Three seats: three get in, the fourth does not.
+    fresh_server();
+    for (int i = 0; i < 4; i++) {
+        char ip[20];
+        snprintf(ip, sizeof ip, "5.5.5.%d", i + 1);
+        hello(i, ip, "P");
+    }
+    r = create(0, "\"seats\":3");
+    join_id(1, id_of(0));
+    join_id(2, id_of(0));
+    join_id(3, id_of(0));
+    CHECK(member_count(&S->rooms[r]) == 3 && S->clients[3].state == CL_IDLE);
+}
+
+// --- Sitting in a waiting room not ready -------------------------------------------
+static void test_unready_timeout(void) {
+    // Alone and never ready: moved out, and the empty room goes with them.
+    fresh_server();
+    hello(0, "1.1.1.1", "Ann");
+    int r = create(0, "");
+    tick_ms(1000);
+    tick_ms(SRV_LOBBY_UNREADY_MS - 2000);
+    CHECK(S->rooms[r].active && room_of(0) == r);
+    tick_ms(3000);
+    CHECK(!S->rooms[r].active && S->clients[0].state == CL_IDLE);
+    char why[16];
+    jstr(last_msg(0, "removed"), "why", why, sizeof why);
+    CHECK(strcmp(why, "idle") == 0);
+
+    // Ready is the sign of someone waiting: they keep the room as long as
+    // they like, while the one who never readied is moved out.
+    fresh_server();
+    hello(0, "1.1.1.1", "Ann");
+    hello(1, "2.2.2.2", "Afk");
+    r = create(0, "");
+    join_id(1, id_of(0));
+    ready(0);
+    tick_ms(1000);
+    tick_ms(SRV_LOBBY_UNREADY_MS + 1000);
+    CHECK(S->rooms[r].active && room_of(0) == r && S->rooms[r].m[0].ready);
+    CHECK(S->clients[1].state == CL_IDLE && member_count(&S->rooms[r]) == 1);
+    tick_ms(SRV_LOBBY_UNREADY_MS * 3);
+    CHECK(S->rooms[r].active && room_of(0) == r);
+
+    // Readying and un-readying restarts the clock (they are plainly there).
+    fresh_server();
+    hello(0, "1.1.1.1", "Ann");
+    r = create(0, "");
+    tick_ms(1000);
+    tick_ms(SRV_LOBBY_UNREADY_MS - 5000);
+    ready(0);
+    tick_ms(1000);
+    say(0, "{\"t\":\"ready\",\"on\":0}");
+    tick_ms(SRV_LOBBY_UNREADY_MS - 5000);
+    CHECK(S->rooms[r].active && room_of(0) == r);
+
+    // Back from a match, the clock starts over.
+    fresh_server();
+    two_player_match(&r, "\"target\":50");
+    play_match_out(&S->rooms[r]);
+    CHECK(S->rooms[r].phase == PHASE_LOBBY);
+    tick_ms(1000);                                      // the daemon ticks 4x a second
+    tick_ms(SRV_LOBBY_UNREADY_MS - 5000);
+    CHECK(S->rooms[r].active && member_count(&S->rooms[r]) == 2);
+    tick_ms(10000);
+    CHECK(!S->rooms[r].active);
+}
+
+// --- Per-address limits ---------------------------------------------------------------
+static void test_address_limits(void) {
+    char code[16];
+
+    // Connections: the cap's worth are served; the next is told the server is
+    // busy, closed, and not listened to. One leaving makes room for one more.
+    // Another address is unaffected throughout.
+    fresh_server();
+    for (int i = 0; i < SRV_IP_MAX_CONNS; i++) hello(300 + i, "6.6.6.6", "Many");
+    CHECK(last_msg(300 + SRV_IP_MAX_CONNS - 1, "hi") != NULL);
+    int over = 300 + SRV_IP_MAX_CONNS;
+    hello(over, "6.6.6.6", "Many");
+    jstr(last_msg(over, "error"), "code", code, sizeof code);
+    CHECK(strcmp(code, "busy") == 0 && was_kicked(over));
+    CHECK(last_msg(over, "hi") == NULL);
+    say(over, "{\"t\":\"create\"}");
+    CHECK(last_msg(over, "welcome") == NULL);
+    srv_client_gone(S, over, NOW);
+    hello(1, "7.7.7.7", "Else");
+    CHECK(last_msg(1, "hi") != NULL);
+    srv_client_gone(S, 300, NOW);
+    hello(over, "6.6.6.6", "Many");
+    CHECK(last_msg(over, "hi") != NULL);
+
+    // Joins: an address may browse in and out of rooms, but not without end.
+    fresh_server();
+    hello(0, "1.1.1.1", "Host");
+    hello(1, "2.2.2.2", "Hopper");
+    int r = create(0, "");
+    long id = id_of(0);
+    int ok = 0;
+    for (int i = 0; i < IPJOIN_MAX + 5; i++) {
+        join_id(1, id);
+        if (room_of(1) == r) {
+            ok++;
+            say(1, "{\"t\":\"leave\"}");
+        }
+        NOW += 200;
+    }
+    CHECK(ok == IPJOIN_MAX);
+    jstr(last_msg(1, "error"), "code", code, sizeof code);
+    CHECK(strcmp(code, "rate") == 0);
+    // Someone else still gets in, and the window passes.
+    hello(2, "3.3.3.3", "Guest");
+    join_id(2, id);
+    CHECK(room_of(2) == r);
+    NOW += IPCAP_WINDOW_MS + 1000;
+    join_id(1, id);
+    CHECK(room_of(1) == r);
+}
+
+// --- No room left: the server says so ------------------------------------------------
+static void test_server_full(void) {
+    fresh_server();
+    // Fill every slot with a room whose only member has just dropped (each
+    // is held for the grace period), a different address each time.
+    for (int i = 0; i < SRV_MAX_ROOMS; i++) {
+        char ip[24];
+        snprintf(ip, sizeof ip, "10.%d.%d.1", i / 250, i % 250);
+        hello(0, ip, "Host");
+        say(0, "{\"t\":\"create\"}");
+        srv_client_gone(S, 0, NOW);
+    }
+    char buf[256];
+    srv_status_json(S, buf, sizeof buf, NOW);
+    CHECK(jfield(buf, "rooms") == SRV_MAX_ROOMS);
+    hello(1, "11.0.0.1", "Late");
+    int before = s_sent_n;
+    say(1, "{\"t\":\"create\"}");
+    char code[16];
+    jstr(last_msg(1, "error"), "code", code, sizeof code);
+    CHECK(count_msgs(1, "error", before) == 1 && strcmp(code, "busy") == 0);
+    CHECK(S->clients[1].state == CL_IDLE);
 }
 
 // --- Leaving mid-match: wait, Let AI play, return -------------------------------
@@ -1195,6 +1578,12 @@ static void test_snapshot(void) {
     CHECK(!srv_restore(S, s_snap, len, NOW));
     CHECK(!S->rooms[r].active);
     CHECK(!srv_restore(S, s_snap, 3, NOW));
+    // So is the format before this one: its rooms hold keys and seeds from a
+    // generator a member could run forward, and none of them may come back.
+    h.version = 2;
+    memcpy(s_snap, &h, sizeof h);
+    CHECK(!srv_restore(S, s_snap, len, NOW));
+    CHECK(!S->rooms[r].active);
 }
 
 // --- Silence: clients ping; the quiet are dropped ---------------------------------
@@ -1340,7 +1729,9 @@ int main(void) {
     printf("             grace, partners, room list, idle players, leave policy,\n");
     printf("             pause, forfeit, rematch, absent at match end, events,\n");
     printf("             redaction, turn clock, reveal backstop, audit replay,\n");
-    printf("             snapshot, silence, abuse, 200-table load, status\n");
+    printf("             snapshot, silence, abuse, 200-table load, status,\n");
+    printf("             entropy, countdown lock, seats, not-ready clock,\n");
+    printf("             per-address limits, server full\n");
     test_ws_codec();
     test_wire_codec();
     test_names();
@@ -1350,6 +1741,12 @@ int main(void) {
     test_partners();
     test_room_list();
     test_idle_not_ready();
+    test_entropy();
+    test_countdown_lock();
+    test_seats();
+    test_unready_timeout();
+    test_address_limits();
+    test_server_full();
     test_leave_policy();
     test_everyone_away();
     test_forfeit_and_switch();

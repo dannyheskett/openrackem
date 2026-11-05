@@ -1,5 +1,6 @@
-// Persisted settings — see prefs.h: the player name and the seat key of a
-// live online match for Return to Game. Storage is chosen per platform:
+// Persisted settings — see prefs.h: the player name, the seat key of a live
+// online match for Return to Game, and the last New Room settings. Storage is
+// chosen per platform:
 // desktop config dir, mobile app-private dir, web localStorage.
 #include "prefs.h"
 #include "platform.h"
@@ -15,6 +16,12 @@
 static char s_name[NAME_CAP] = {0};
 static char s_seat[KEY_CAP]  = {0};
 
+// The last New Room settings: seats, target, bonus, partners. Stored under
+// the key "newroom" — not "room", which files from older builds may still
+// carry with another meaning (a saved private room).
+static int  s_room[4];
+static bool s_room_set = false;
+
 const char* prefs_name(void)     { return s_name; }
 const char* prefs_seat_key(void) { return s_seat; }
 
@@ -23,7 +30,9 @@ void prefs_set_name(const char* n) {
     if (n) {
         for (size_t i = 0; n[i] && j < NAME_CAP - 1; i++) {
             unsigned char c = (unsigned char)n[i];
-            if (c >= 32 && c < 127) s_name[j++] = (char)c;
+            // Printable ASCII, less the three characters that would end a
+            // quoted string: the web build writes the name into one.
+            if (c >= 32 && c < 127 && c != '\'' && c != '"' && c != '\\') s_name[j++] = (char)c;
         }
     }
     s_name[j] = '\0';
@@ -43,6 +52,49 @@ static void set_alnum(char* out, size_t cap, const char* in) {
 
 void prefs_set_seat_key(const char* key) { set_alnum(s_seat, sizeof s_seat, key); }
 
+bool prefs_room(int* seats, int* target, bool* bonus, bool* partners) {
+    if (!s_room_set) return false;
+    *seats = s_room[0];
+    *target = s_room[1];
+    *bonus = s_room[2] != 0;
+    *partners = s_room[3] != 0;
+    return true;
+}
+
+void prefs_set_room(int seats, int target, bool bonus, bool partners) {
+    s_room[0] = seats;
+    s_room[1] = target;
+    s_room[2] = bonus ? 1 : 0;
+    s_room[3] = partners ? 1 : 0;
+    s_room_set = true;
+}
+
+// "seats,target,bonus,partners" as stored. Anything that doesn't read as four
+// small numbers is ignored (the screen then opens with its defaults).
+static void set_room_str(const char* v) {
+    int a[4] = {0, 0, 0, 0}, n = 0;
+    const char* p = v ? v : "";
+    while (n < 4) {
+        if (*p < '0' || *p > '9') return;
+        int val = 0, digits = 0;
+        while (*p >= '0' && *p <= '9') {
+            if (++digits > 5) return;
+            val = val * 10 + (*p++ - '0');
+        }
+        a[n++] = val;
+        if (n < 4) {
+            if (*p != ',') return;
+            p++;
+        }
+    }
+    if (*p != '\0') return;
+    prefs_set_room(a[0], a[1], a[2] != 0, a[3] != 0);
+}
+
+static void room_str(char* out, size_t cap) {
+    snprintf(out, cap, "%d,%d,%d,%d", s_room[0], s_room[1], s_room[2], s_room[3]);
+}
+
 #if defined(PLATFORM_WEB)
 // ---------------------------------------------------------------------------
 // Web: browser localStorage (survives reloads; no filesystem needed).
@@ -58,11 +110,13 @@ static void web_get(const char* key, void (*set)(const char*)) {
 void prefs_load(void) {
     web_get("name", prefs_set_name);
     web_get("seat", prefs_set_seat_key);
+    web_get("newroom", set_room_str);
 }
 
 static void web_set(const char* key, const char* val) {
-    // Every value is sanitized (printable name; alphanumeric key) and the
-    // name filter drops quotes and backslashes, so interpolation is safe.
+    // Every value is sanitized (printable name; alphanumeric key; digits and
+    // commas for the room) and the name filter drops quotes and backslashes,
+    // so interpolation is safe.
     char js[160];
     snprintf(js, sizeof js, "localStorage.setItem('openrackem_%s','%s')", key, val);
     emscripten_run_script(js);
@@ -71,6 +125,11 @@ static void web_set(const char* key, const char* val) {
 void prefs_save(void) {
     web_set("name", s_name);
     web_set("seat", s_seat);
+    if (s_room_set) {
+        char room[48];
+        room_str(room, sizeof room);
+        web_set("newroom", room);
+    }
 }
 
 #else
@@ -160,6 +219,7 @@ static void apply_line(const char* line) {
     // room= / owner= lines from older builds (private rooms) are ignored.
     if (kl == 4 && strncmp(line, "name", 4) == 0) prefs_set_name(v);
     else if (kl == 4 && strncmp(line, "seat", 4) == 0) set_alnum(s_seat, sizeof s_seat, v);
+    else if (kl == 7 && strncmp(line, "newroom", 7) == 0) set_room_str(v);
 }
 
 void prefs_load(void) {
@@ -182,6 +242,11 @@ void prefs_save(void) {
     FILE* f = fopen(path, "wb");
     if (!f) return;
     fprintf(f, "name=%s\nseat=%s\n", s_name, s_seat);
+    if (s_room_set) {
+        char room[48];
+        room_str(room, sizeof room);
+        fprintf(f, "newroom=%s\n", room);
+    }
     fclose(f);
 }
 

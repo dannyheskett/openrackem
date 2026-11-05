@@ -24,11 +24,21 @@ static int failures = 0;
     } while (0)
 
 // Faked net backend: netgame.c references these, but the parse tests never
-// call them. (A real backend links in the app build via the Makefile.)
+// call them. (A real backend links in the app build via the Makefile.) A send
+// is recorded, and succeeds only while s_net_up is set.
+static bool s_net_up = false;
+static char s_last_sent[512];
+static int  s_sends = 0;
 NetConn* net_connect(const char* h, int p, const char* pa, bool tls) { (void)h;(void)p;(void)pa;(void)tls; return 0; }
 void      net_poll(NetConn* c) { (void)c; }
 NetStatus net_status(const NetConn* c) { (void)c; return NET_ERROR; }
-bool      net_send(NetConn* c, const char* t, size_t l) { (void)c;(void)t;(void)l; return false; }
+bool      net_send(NetConn* c, const char* t, size_t l) {
+    (void)c;
+    if (!s_net_up) return false;
+    snprintf(s_last_sent, sizeof s_last_sent, "%.*s", (int)l, t);
+    s_sends++;
+    return true;
+}
 int       net_recv(NetConn* c, char* b, size_t cap) { (void)c;(void)b;(void)cap; return -1; }
 void      net_close(NetConn* c) { (void)c; }
 bool      net_available(void) { return true; }
@@ -274,6 +284,7 @@ static void test_parse_lobby(void) {
     NgLobby* L = &ng.lobby;
     CHECK(L->id == 8193 && ng.room_id == 8193);
     CHECK(L->target == 750 && L->bonus && L->partners && L->games == 2);
+    CHECK(L->seats == 4);                               // not sent: four
     CHECK(L->me == 2);
     CHECK(strcmp(L->names[1], "Alex") == 0 && L->names[3][0] == '\0');
     CHECK(L->used[2] && !L->used[3]);
@@ -290,6 +301,16 @@ static void test_parse_lobby(void) {
     CHECK(netgame_parse_lobby(&ng, "{\"t\":\"lobby\",\"v\":3,\"me\":0,\"games\":99999999}"));
     CHECK(ng.lobby.games == 9999);
     CHECK(!netgame_parse_lobby(&ng, "{\"t\":\"lobby\",\"v\":2,\"me\":0}"));
+
+    // Seats: taken when it is 2..4, four when it is anything else.
+    CHECK(netgame_parse_lobby(&ng, "{\"t\":\"lobby\",\"v\":3,\"me\":0,\"seats\":2}"));
+    CHECK(ng.lobby.seats == 2);
+    CHECK(netgame_parse_lobby(&ng, "{\"t\":\"lobby\",\"v\":3,\"me\":0,\"seats\":3}"));
+    CHECK(ng.lobby.seats == 3);
+    CHECK(netgame_parse_lobby(&ng, "{\"t\":\"lobby\",\"v\":3,\"me\":0,\"seats\":99}"));
+    CHECK(ng.lobby.seats == 4);
+    CHECK(netgame_parse_lobby(&ng, "{\"t\":\"lobby\",\"v\":3,\"me\":0,\"seats\":-1}"));
+    CHECK(ng.lobby.seats == 4);
 }
 
 static void test_parse_rooms(void) {
@@ -306,6 +327,13 @@ static void test_parse_rooms(void) {
     CHECK(ng.rooms[0].ready[0] && ng.rooms[0].ready[1] && !ng.rooms[0].ready[2]);
     CHECK(ng.rooms[1].id == 12 && ng.rooms[1].n == 1 && ng.rooms[1].target == 250);
     CHECK(ng.rooms[1].bonus && !ng.rooms[1].partners);
+    CHECK(ng.rooms[0].seats == 4 && ng.rooms[1].seats == 4);   // not sent: four
+
+    // Seats per room; a short or wild array falls back to four.
+    CHECK(netgame_parse_rooms(&ng, "{\"t\":\"rooms\",\"total\":3,\"ids\":[1,2,3],"
+                                   "\"seats\":[2,77],\"names\":[[\"A\"],[\"B\"],[\"C\"]]}"));
+    CHECK(ng.room_count == 3);
+    CHECK(ng.rooms[0].seats == 2 && ng.rooms[1].seats == 4 && ng.rooms[2].seats == 4);
 
     // Empty list.
     CHECK(netgame_parse_rooms(&ng, "{\"t\":\"rooms\",\"total\":0,\"ids\":[]}"));
@@ -335,10 +363,86 @@ static void test_parse_rooms(void) {
     }
 }
 
+// --- Making a room -------------------------------------------------------------------
+static void test_room_setup(void) {
+    // The defaults, and what normalize does to values from anywhere.
+    NgRoomSetup rs = netgame_room_default();
+    CHECK(rs.seats == 4 && rs.target == 500 && !rs.bonus && !rs.partners);
+    CHECK(rules_room_valid(rs.seats, rs.target, rs.partners));
+
+    rs = (NgRoomSetup){ .seats = 9, .target = 7, .bonus = true, .partners = true };
+    netgame_room_normalize(&rs);
+    CHECK(rs.seats == 4 && rs.target == 500 && rs.bonus && rs.partners);
+    rs = (NgRoomSetup){ .seats = 2, .target = 750, .partners = true };
+    netgame_room_normalize(&rs);
+    CHECK(rs.seats == 2 && rs.target == 750 && !rs.partners);   // Partners is four players
+    rs = (NgRoomSetup){ .seats = 0, .target = 50 };
+    netgame_room_normalize(&rs);
+    CHECK(rs.seats == 4 && rs.target == 50);
+    // Whatever goes in, what comes out is something the server accepts.
+    for (int seats = -1; seats <= 6; seats++) {
+        for (int t = 0; t <= 1100; t += 50) {
+            for (int p = 0; p < 2; p++) {
+                rs = (NgRoomSetup){ .seats = seats, .target = t, .partners = p != 0 };
+                netgame_room_normalize(&rs);
+                CHECK(rules_room_valid(rs.seats, rs.target, rs.partners));
+            }
+        }
+    }
+
+    // What create puts on the wire.
+    NetGame ng;
+    memset(&ng, 0, sizeof ng);
+    ng.conn = (NetConn*)&ng;     // never dereferenced: the backend is faked
+    ng.state = NG_IDLE;
+    s_net_up = true;
+    s_sends = 0;
+    rs = (NgRoomSetup){ .seats = 2, .target = 250, .bonus = true, .partners = false };
+    netgame_create(&ng, &rs);
+    CHECK(s_sends == 1);
+    CHECK(strcmp(s_last_sent, "{\"t\":\"create\",\"target\":250,\"bonus\":1,"
+                              "\"partners\":0,\"seats\":2}") == 0);
+
+    // In flight: a second tap, on New Room or on a room, sends nothing.
+    CHECK(ng.joining);
+    netgame_create(&ng, &rs);
+    netgame_join_room(&ng, 4097);
+    netgame_rejoin(&ng, "0123456789abcdef0123456789abcdef");
+    CHECK(s_sends == 1);
+
+    // The server's answer, either way, frees the next one.
+    unsigned ev = 0;
+    const char* err = "{\"t\":\"error\",\"code\":\"bad_rules\"}";
+    handle_message(&ng, err, strlen(err), &ev);
+    CHECK(!ng.joining && strcmp(ng.notice, "bad_rules") == 0 && ng.state == NG_IDLE);
+    snprintf(ng.stale_key, sizeof ng.stale_key, "feedfacefeedfacefeedfacefeedface");
+    netgame_join_room(&ng, 4097);
+    CHECK(s_sends == 2 && ng.joining);
+    CHECK(strcmp(s_last_sent, "{\"t\":\"join\",\"room\":4097,"
+                              "\"key\":\"feedfacefeedfacefeedfacefeedface\"}") == 0);
+    const char* wel = "{\"t\":\"welcome\",\"v\":3,\"key\":\"aa\",\"id\":4097,\"playing\":0}";
+    handle_message(&ng, wel, strlen(wel), &ev);
+    CHECK(!ng.joining && ng.state == NG_LOBBY);
+
+    // No settings given: the defaults. A send that fails holds nothing up.
+    memset(&ng, 0, sizeof ng);
+    ng.conn = (NetConn*)&ng;
+    ng.state = NG_IDLE;
+    netgame_create(&ng, NULL);
+    CHECK(strstr(s_last_sent, "\"target\":500,\"bonus\":0,\"partners\":0,\"seats\":4") != NULL);
+    memset(&ng, 0, sizeof ng);
+    ng.conn = (NetConn*)&ng;
+    ng.state = NG_IDLE;
+    s_net_up = false;
+    netgame_create(&ng, NULL);
+    CHECK(!ng.joining);
+    ng.conn = NULL;
+}
+
 int main(void) {
     printf("test_netgame: state reconstruction — mid-round redaction, reveal,\n");
     printf("              public discard draw, junk rejection, v3 fields,\n");
-    printf("              waiting room, room list\n");
+    printf("              waiting room, room list, making a room\n");
     test_parse_midround();
     test_parse_reveal();
     test_parse_discard_public();
@@ -346,6 +450,7 @@ int main(void) {
     test_parse_v2_fields();
     test_parse_lobby();
     test_parse_rooms();
+    test_room_setup();
     if (failures == 0) { printf("OK: all checks passed\n"); return 0; }
     printf("FAILED: %d check(s)\n", failures);
     return 1;

@@ -107,16 +107,23 @@ assembled `.ipa`, no Xcode project). CI builds all of these on every PR; see
 **Play Online** needs a player name (it asks for one first). It opens the
 room list:
 
-- **Rooms** are listed by who's in them, with a ready dot per player and the
-  room's rules (Play To, Bonus, Partners). Tap one that isn't full to step into
-  its waiting room; Leave puts you straight back on the list. **New Room**
-  makes a room with the rules from Options; the rules are fixed for the room's
-  life.
+- **Rooms** are listed by who's in them, with a ready dot per player, how full
+  the room is ("2/4") and its rules (Play To, Bonus, Partners). Tap one that
+  isn't full to step into its waiting room; Leave puts you straight back on the
+  list.
+- **New Room** opens the room's own settings: Seats (how many the room holds,
+  2 to 4), Play To, Bonus Scoring and Partners (which takes all four seats),
+  then Create Room. They are fixed for the room's life and remembered for the
+  next room you make. The Options screen is for games against the CPU only:
+  nothing on it changes an online room.
 - **Waiting room:** everyone's name with a ready dot (filled = ready). When
-  everyone present (2–4 players) is ready, the game starts. Partners needs 4
-  in two teams of two; Switch Team moves you across, trading places with
-  someone if the other team is full. If two players are ready and someone
-  isn't for a minute, the ready players can Start Without Them.
+  everyone present (2–4 players) is ready, a two-second countdown starts the
+  game. Once it is running the table is set: nobody new can join and Ready
+  can't be taken back (Leave still works). Partners needs 4 in two teams of
+  two; Switch Team moves you across, trading places with someone if the other
+  team is full. If two players are ready and someone isn't for a minute, the
+  ready players can Start Without Them, and anyone who stays not ready for ten
+  minutes is moved back to the room list.
 - **After a match** everyone lands back in the same waiting room, with the
   result on show, ready to go again. The room is listed while it waits and
   lives as long as anyone is in it. A tie at the target plays another round.
@@ -154,8 +161,10 @@ plays every room flow over loopback against the real daemon. See
 ## Architecture notes
 
 - `game.c` / `rules.c` / `ai.c` are pure logic: no rendering, no raylib, no
-  `rand()`, no clock. All randomness flows from one seeded xorshift64* state,
-  so a match replays byte-for-byte from `(seed, rules, action list)`.
+  `rand()`, no clock. All randomness flows from the seed, so a match replays
+  byte-for-byte from `(seed, rules, action list)`. The deals come from a
+  ChaCha20 keystream keyed by it (pinned to the RFC 8439 test vector), so the
+  cards a player has seen don't give away the ones they haven't.
 - Game state is a flat POD with no pointers; a snapshot is a `memcpy`
   (`GAME_SERIAL_SIZE`), which tests enforce.
 - The AI consumes a redacted `GameView` — it structurally cannot see another

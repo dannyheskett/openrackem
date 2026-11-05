@@ -1,5 +1,17 @@
 #include "rules.h"
 
+const int RULES_TARGET_CHOICES[RULES_TARGET_CHOICES_N] = {250, 500, 750, 1000};
+
+bool rules_target_valid(int target) {
+    return target >= RULES_TARGET_MIN && target <= RULES_TARGET_MAX;
+}
+
+bool rules_room_valid(int seats, int target, bool partners) {
+    if (seats < RULES_SEATS_MIN || seats > RULES_SEATS_MAX) return false;
+    if (!rules_target_valid(target)) return false;
+    return !partners || seats == RULES_SEATS_MAX;
+}
+
 Rules rules_default(void) {
     Rules r = {
         .player_count         = 4,
@@ -25,8 +37,8 @@ void rules_normalize(Rules* r) {
 
     // Keep the target sane: a round awards at most 475 (bonus 6+ run), so 50 is
     // the lowest target that still takes a full round to reach.
-    if (r->target_score < 50) r->target_score = 50;
-    if (r->target_score > 10000) r->target_score = 10000;
+    if (r->target_score < RULES_TARGET_MIN) r->target_score = RULES_TARGET_MIN;
+    if (r->target_score > RULES_TARGET_MAX) r->target_score = RULES_TARGET_MAX;
 
     // Partners is defined only for exactly 4 players, seated alternately.
     if (r->player_count != 4) r->partners = false;

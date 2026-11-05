@@ -7,7 +7,13 @@
 // whole process idles in a few tens of MB on a shared-cpu-1x machine.
 //
 // fly.io terminates TLS at its edge; this listens on plain TCP ($PORT,
-// default 8080) and trusts the Fly-Client-IP header for rate limiting.
+// default 8080) and trusts the Fly-Client-IP header for rate limiting. An IPv6
+// address is counted by its /64 (one subscriber's whole allocation), so the
+// per-address limits can't be walked around by changing the low bits.
+//
+// Member keys and match seeds come from getrandom(2). The daemon will not
+// start without it: a guessable key is someone else's seat, and a guessable
+// seed is every card in the deck.
 //
 // Persistence: with $OR_DATA_DIR set (the Fly volume, /data), the core's
 // snapshot — every live match and occupied waiting room — is loaded at boot and
@@ -37,6 +43,7 @@
 #define OUT_CAP  32768    // the room list plus a burst of states; overflow = close
 #define TICK_MS  250      // core tick cadence (well under every core deadline)
 #define SNAP_EVERY_MS 5000  // snapshot spacing while the core is dirty
+#define HANDSHAKE_MS 10000  // a socket must finish the WebSocket upgrade by then
 
 typedef struct {
     int    fd;            // -1 = free slot
@@ -44,6 +51,7 @@ typedef struct {
     bool   kill;          // deferred close (swept after each event batch)
     size_t in_len;
     size_t out_len;
+    int64_t opened_ms;    // accepted at (the handshake deadline runs from here)
     char   ip[46];
     uint8_t in[IN_CAP];
     uint8_t out[OUT_CAP];
@@ -141,6 +149,52 @@ static void io_log(void* ud, const char* line) {
     fflush(stdout);
 }
 
+// Fill `out` from the kernel's random source. Checked once at startup; a
+// failure after that (it does not happen on Linux once the pool is up) ends
+// the process rather than hand out a key or a seed that isn't random.
+static bool os_random(uint8_t* out, size_t n) {
+    size_t got = 0;
+    while (got < n) {
+        ssize_t r = getrandom(out + got, n - got, 0);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            return false;
+        }
+        got += (size_t)r;
+    }
+    return true;
+}
+
+static void io_entropy(void* ud, uint8_t* out, size_t n) {
+    (void)ud;
+    if (!os_random(out, n)) {
+        perror("getrandom");
+        _exit(1);
+    }
+}
+
+// The address the limits count: an IPv4 address as it is, an IPv6 address
+// reduced to its /64. An IPv4-mapped IPv6 address (the dual-stack listener's
+// view of an IPv4 peer) is written as plain IPv4. Anything unparseable is
+// kept verbatim.
+static void limit_addr(const char* in, char* out, size_t cap) {
+    struct in6_addr a6;
+    struct in_addr a4;
+    if (inet_pton(AF_INET, in, &a4) == 1) {
+        snprintf(out, cap, "%s", in);
+        return;
+    }
+    if (inet_pton(AF_INET6, in, &a6) == 1) {
+        if (IN6_IS_ADDR_V4MAPPED(&a6)) {
+            memcpy(&a4, a6.s6_addr + 12, 4);
+            if (inet_ntop(AF_INET, &a4, out, (socklen_t)cap)) return;
+        }
+        memset(a6.s6_addr + 8, 0, 8);
+        if (inet_ntop(AF_INET6, &a6, out, (socklen_t)cap)) return;
+    }
+    snprintf(out, cap, "%s", in);
+}
+
 // --- HTTP ---------------------------------------------------------------------
 // Case-insensitive single-header lookup within the handshake bytes.
 static bool http_header(const char* req, size_t len, const char* name,
@@ -221,6 +275,8 @@ static void handle_readable(int idx, int64_t now) {
         if (http_header(req, req_len, "fly-client-ip", ip, sizeof ip)) {
             snprintf(c->ip, sizeof c->ip, "%s", ip);
         }
+        limit_addr(c->ip, ip, sizeof ip);
+        snprintf(c->ip, sizeof c->ip, "%s", ip);
 
         out_append(idx, (const uint8_t*)resp, (size_t)rn);
         flush_conn(idx);
@@ -317,11 +373,13 @@ int main(void) {
 
     for (int i = 0; i < SRV_MAX_CLIENTS; i++) s_conns[i].fd = -1;
 
+    // No random source, no server: see the note at the top of the file.
     uint64_t seed = 0;
-    if (getrandom(&seed, sizeof seed, 0) != (ssize_t)sizeof seed || seed == 0) {
-        seed = (uint64_t)time(NULL) * 2654435761u + (uint64_t)getpid();
+    if (!os_random((uint8_t*)&seed, sizeof seed)) {
+        perror("orserverd: getrandom");
+        return 1;
     }
-    SrvIo io = {io_send, io_kick, io_log, NULL};
+    SrvIo io = {io_send, io_kick, io_log, NULL, io_entropy};
     s_core = srv_create(&io, seed);
 
     const char* dir = getenv("OR_DATA_DIR");
@@ -394,6 +452,7 @@ int main(void) {
                     Conn* c = &s_conns[slot];
                     memset(c, 0, sizeof *c);
                     c->fd = fd;
+                    c->opened_ms = now;
                     // Peer address as the fallback IP (Fly-Client-IP wins later).
                     if (sa.ss_family == AF_INET6) {
                         inet_ntop(AF_INET6, &((struct sockaddr_in6*)&sa)->sin6_addr,
@@ -419,8 +478,14 @@ int main(void) {
         }
 
         // Deferred closes: never mid-callback, so the core is not reentered.
+        // A socket that never finishes the upgrade is closed too: until then
+        // the core doesn't know it exists (so its silence check can't see it),
+        // and it would hold a connection slot for as long as it liked.
         for (int i = 0; i < SRV_MAX_CLIENTS; i++) {
-            if (s_conns[i].fd >= 0 && s_conns[i].kill) close_conn(i, now);
+            Conn* c = &s_conns[i];
+            if (c->fd < 0) continue;
+            if (!c->ws && now - c->opened_ms > HANDSHAKE_MS) c->kill = true;
+            if (c->kill) close_conn(i, now);
         }
 
         if (now - last_tick >= TICK_MS) {

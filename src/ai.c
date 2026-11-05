@@ -5,7 +5,7 @@
 // libc; the only randomness is the caller's xorshift64* state.
 #include "ai.h"
 
-// --- RNG (same generator the engine uses; the state is the caller's) --------
+// --- RNG (xorshift64*; the state is the caller's — in a game, Game.rng) ------
 static uint64_t ai_rng_next(uint64_t* s) {
     uint64_t x = *s;
     x ^= x >> 12;
