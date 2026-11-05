@@ -55,8 +55,8 @@ int main(void) {
            full ? " full match" : "");
 
     NetGame a, b;
-    Rules r = rules_default();
-    r.target_score = 50;
+    NgRoomSetup r = netgame_room_default();
+    r.target = 50;
     netgame_start(&a, host, port, tls, "Ava", NULL);
     netgame_start(&b, host, port, tls, "Bo", NULL);
     for (int i = 0; i < 5000 && (a.state != NG_IDLE || b.state != NG_IDLE); i++) {

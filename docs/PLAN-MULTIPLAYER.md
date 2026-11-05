@@ -8,8 +8,9 @@ iOS), cross-playing. Everything happens in **rooms** (protocol v3,
 2026-11-01; v2 had public and private rooms, v1 Quick Match):
 
 - There is **one kind of room**. It is listed by who's in it while it waits,
-  joinable while it isn't full, and gone the moment it's empty. Its rules
-  (Play To, Bonus, Partners) are fixed when it's made.
+  joinable while it isn't full, and gone the moment it's empty. Its settings
+  (Seats, Play To, Bonus, Partners) are fixed when it's made. Seats is the
+  room's capacity, 2 to 4 (4 unless asked for; Partners needs 4).
 - A **waiting room** shows every name with a ready flag; when everyone
   present (2–4) is ready, the match deals for exactly those players. After a
   match the table returns to the same waiting room, with the result on show,
@@ -72,7 +73,7 @@ may see.
   and a from-scratch RFC 6455 subset (`ws.c` — the repo vendors nothing), a
   strict flat-JSON codec (`wire.c`), and the socket-free, time-injected pool
   core (`server_core.c`) that tests/test_server.c drives directly. No
-  threads, no allocation after startup; fixed pools (1024 rooms, 2048
+  threads, no allocation after startup; fixed pools (4096 rooms, 2048
   connections, ~40 MB total) bound everything.
 
 ## 4. Protocol (v3)
@@ -84,8 +85,8 @@ and identifier strings — `wire.c`); anything else closes the socket.
 |---|---|---|
 | `hello` | `v`=3, `name` | `need_name` / `bad_name` / `upgrade` errors |
 | `list` / `unlist` | — | subscribe to `rooms` pushes |
-| `create` | `target`, `bonus`, `partners`, `key` | rules fixed for the room's life |
-| `join` | `room`, `key` | `key` surrenders a seat held elsewhere |
+| `create` | `target`, `bonus`, `partners`, `seats`, `key` | settings fixed for the room's life; `seats` 2–4, default 4; a request the room can't honor is refused with `bad_rules`, never adjusted; `busy` when no room is free |
+| `join` | `room`, `key` | `key` surrenders a seat held elsewhere; `full`, `started` (also while the room counts down), `rate` |
 | `rejoin` | `key` | back to a seat (Return to Game, reconnect) |
 | `ready` | `on` | waiting room |
 | `team` | — | Partners: switch sides, trading places if the other side is full |
@@ -96,11 +97,30 @@ and identifier strings — `wire.c`); anything else closes the socket.
 | `here` / `forfeit` | — | back from stepping away / give the seat up |
 | `ping` | — | every 10 s; 25 s of silence drops the client |
 
-Server → client: `hi`, `rooms` (every waiting room that isn't full, fullest
-first, up to 20: ids, names, ready, rules), `lobby` (the waiting room: names,
-ready, teams, countdown, why it can't start, games played), `welcome`
-(member key, room id), `state` (v1 fields + `ctl[]` away flags + the
-absent-player wait), `back`, `removed`, `error`.
+Server → client: `hi`, `rooms` (every waiting room that isn't full or
+counting down, fullest first, up to 20: ids, names, ready, rules, seats),
+`lobby` (the waiting room: names, ready, teams, seats, countdown, why it can't
+start, games played), `welcome` (member key, room id), `state` (v1 fields +
+`ctl[]` away flags + the absent-player wait), `back`, `removed`, `error`.
+
+`seats` was added within v3 (2026-11-05) as an optional field in both
+directions: a client that doesn't send it gets a four-seat room, and a client
+that doesn't read it shows four. Nothing else on the wire changed, so there
+was no version bump.
+
+Member keys and match seeds are drawn from the operating system's random
+source (`SrvIo.entropy`, `getrandom` in the daemon, which won't start without
+it). Either one reconstructs hidden state — a key is a seat, a seed is every
+card — so neither may be derivable from anything a client is sent. Until
+2026-11-05 both came from one seeded xorshift whose whole state a single key
+gave away; that generator now only stands in for the random source in the
+unit tests.
+
+The shuffle is hardened to match (2026-11-05): the engine deals from a
+ChaCha20 keystream keyed by the match seed instead of from xorshift, so the
+cards a seat is shown don't lead back to the seed or to anyone else's cards
+(`docs/PLAN.md` §14.2). Replay from `(seed, Rules, action list)` and the
+audit log are unchanged.
 
 Redacted state is unchanged from v1: own rack in full, others only at the
 reveal, never the stock order, `rng`, or seed. The engine's events word is
@@ -110,9 +130,18 @@ stepping away or back) carries none, so no client replays a sound.
 ## 5. Server behavior
 
 - **Starting:** everyone present ready, ≥ 2 players (Partners: exactly 4,
-  two teams of two) → 2 s countdown → deal. A new arrival or an un-ready
-  cancels it. Once two players have been ready 60 s with someone present not
-  ready, the ready players may Start without them (the idle ones are removed).
+  two teams of two) → 2 s countdown → deal. The countdown is a commitment:
+  the room is off the list, a join is refused as `started`, and un-ready and
+  Switch Team are ignored. Leaving still works, and stops it only if too few
+  are left to play; a link that drops and returns during it is dealt in.
+  (A join or an un-ready used to cancel it, which let one member hold a room
+  in the waiting room indefinitely.) Once two players have been ready 60 s
+  with someone present not ready, the ready players may Start without them
+  (the idle ones are removed).
+- **Not ready:** a connected member who stays not ready for 10 min is moved
+  out (`removed`, `idle`), so a room someone walked away from doesn't sit on
+  the list as a table nobody can start. Ready is the sign of someone waiting:
+  a ready player keeps a room for as long as they like.
 - **Turn clock:** 45 s per decision; at expiry the AI plays that decision; 3
   consecutive timeouts hand the seat to the AI until the player acts.
 - **Round over:** the next round deals when every present human has
@@ -131,8 +160,11 @@ stepping away or back) carries none, so no client replays a sound.
   the volume (`OR_DATA_DIR`) every few seconds and on shutdown and reloaded
   at boot, so a deploy neither ends games nor scatters a group between them.
 - **Audit log:** per match, `(seed, Rules, action list, scores)` to stdout.
-- **Rate limits:** per-IP room creates; per-connection message cap;
-  malformed frames close the socket.
+- **Limits:** per address, 30 room creates and 60 joins per 10 min (`rate`)
+  and 32 connections at once (`busy`, then closed); per connection, a message
+  budget; malformed frames close the socket; a socket that hasn't finished
+  the WebSocket upgrade in 10 s is closed. An IPv6 address is counted by its
+  /64.
 
 ## 6. Engine additions (all v1-compatible, all tiny)
 
@@ -159,7 +191,19 @@ phase, plus the seed/rng zeroing pinned. Nothing else in the engine changes.
 - **Play Online** (name required) opens the room list: Return to Game (when
   a seat is held), New Room, then the rooms. A room opens into the waiting
   room: Ready, Leave, Switch Team under Partners, Start Without Them when
-  offered. Nothing else. The seat key of a live match persists in prefs.
+  offered (only Leave while the countdown runs). Nothing else. The seat key
+  of a live match persists in prefs.
+- **New Room** opens the room's settings — Seats, Play To, Bonus Scoring,
+  Partners — then Create Room (2026-11-05). Before that a room silently took
+  its rules from the Options screen, where Players and Difficulty meant
+  nothing online and Partners could only be switched on with the offline
+  Players at 4. The settings are the room's own (`NgRoomSetup`), remembered
+  in prefs, and independent of Options, which is now for CPU games only. This
+  is not the New Room screen v3 removed: no codes, no privacy, no owner, and
+  nothing can be changed once the room exists.
+- A create, join or rejoin that hasn't been answered yet holds back the next
+  one, so a double tap sends one request. The standings screen names the
+  Bonus variant when it is on.
 - In a network session the frame loop holds the latest redacted `Game` and
   renders it with the existing renderers (they already draw opponents as
   backs and respect held-card visibility). Input produces the same `Action`s;
@@ -207,6 +251,12 @@ phase, plus the seed/rng zeroing pinned. Nothing else in the engine changes.
   browser tabs play each other.
 
 ## 10. Milestones
+
+Status 2026-11-05: room creation hardened — random keys and seeds, a
+keystream shuffle, the committed countdown, Seats, validated settings, the
+not-ready clock and the per-address limits on the server (§4, §5), and a New
+Room screen with the room's own settings on the client (§7). The snapshot
+format moved to 3, so that deploy starts with no saved rooms.
 
 Status 2026-11-01: **protocol v3 (one room kind) is implemented and
 tested** — the listed room, ready-up, Partners teams, leave-and-return, the

@@ -31,10 +31,18 @@ typedef enum {
 #define NG_LIST_MAX 20
 #define NG_PROTO    3
 
+// What a new room is made with: the New Room screen's settings.
+typedef struct {
+    int  seats;                         // the room's capacity, 2..4
+    int  target;                        // Play To
+    bool bonus, partners;
+} NgRoomSetup;
+
 // One room in the list.
 typedef struct {
     long    id;
     int     n;                          // players in it
+    int     seats;                      // its capacity (4 when the server doesn't say)
     char    names[MAX_PLAYERS][NG_NAME];
     uint8_t ready[MAX_PLAYERS];
     int     target;
@@ -44,6 +52,7 @@ typedef struct {
 // The waiting room we're in.
 typedef struct {
     long    id;
+    int     seats;                      // its capacity (4 when the server doesn't say)
     int     target;
     bool    bonus, partners;
     int     games;                      // matches this room has finished
@@ -93,6 +102,8 @@ typedef struct {
     char     back_name[NG_NAME];  // "X is back"
     int      back_frames;
 
+    bool     joining;           // a create/join/rejoin is in flight: a second
+                                // tap is ignored until the server answers
     bool     confirmed_local;   // we've sent `next` for the current round-over
     bool     pending;           // an action is in flight: don't re-send until
                                 // the authoritative state (or a rejection) lands
@@ -126,10 +137,16 @@ unsigned netgame_update(NetGame* ng);
 // re-syncs them. Kept separate so netgame needs no clock of its own.
 void netgame_elapse(NetGame* ng, int ms);
 
+// A room's settings: the defaults (four seats, play to 500, no variants), and
+// any values brought into what the server accepts — seats 2..4, a valid
+// target, and Partners off below four seats.
+NgRoomSetup netgame_room_default(void);
+void netgame_room_normalize(NgRoomSetup* rs);
+
 // Browsing (NG_IDLE).
 void netgame_list(NetGame* ng);       // subscribe to the room list
 void netgame_unlist(NetGame* ng);
-void netgame_create(NetGame* ng, const Rules* rules);
+void netgame_create(NetGame* ng, const NgRoomSetup* setup);   // NULL = the defaults
 void netgame_join_room(NetGame* ng, long id);
 void netgame_rejoin(NetGame* ng, const char* key);   // Return to Game
 

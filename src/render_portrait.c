@@ -662,8 +662,11 @@ static void draw_standings_portrait(const Game* game) {
     int fs = clampi(h / 40, 10, 64);
 
     text_centered("STANDINGS", w / 2, tb + m * 2, title_fs2, WHITE);
-    snprintf(buf, sizeof buf, "AFTER ROUND %d - FIRST TO %d",
-             game->round_no, game->rules.target_score);
+    // The variant in play is part of the score: say so where the scores are
+    // (online, the room's maker chose it, and nothing else on the table shows it).
+    snprintf(buf, sizeof buf, "AFTER ROUND %d - FIRST TO %d%s",
+             game->round_no, game->rules.target_score,
+             game->rules.bonus_scoring ? " - BONUS" : "");
     text_centered(buf, w / 2, tb + m * 2 + title_fs2 + 6, fs * 3 / 4, SLOT_LABEL);
 
     int y = tb + m * 2 + title_fs2 + 6 + fs + m * 2;

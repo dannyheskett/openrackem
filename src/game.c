@@ -35,22 +35,116 @@
 // keeps the uint8 turn counters from wrapping.
 #define TURN_CAP 200
 
-// --- RNG -------------------------------------------------------------------
-// xorshift64*: tiny, seedable, and good enough to shuffle 60 cards. The state
-// lives in Game.rng and is the engine's only randomness source.
-static uint64_t rng_next(uint64_t* s) {
-    uint64_t x = *s;
-    x ^= x >> 12;
-    x ^= x << 25;
-    x ^= x >> 27;
-    *s = x;
-    return x * 2685821657736338717ULL;
+// --- Deal randomness --------------------------------------------------------
+// Everything a match deals — who deals first, every shuffle — is a function
+// of its seed, so a match still replays byte-for-byte from (seed, Rules,
+// action list). What matters is which function. A player is shown a good part
+// of each shuffle's output (their own rack, the first discard, every card they
+// draw), and online the shuffle must not be something that can be run
+// backwards from that to the cards they were not shown. A small generator such as xorshift (the engine's first
+// shuffle source) gives no such assurance: its state is 64 bits, every output
+// is a simple function of it, and the visible cards of one round carry more
+// than 64 bits about it.
+//
+// So the cards come from ChaCha20 (the block function of RFC 8439 §2.3, pinned
+// to the RFC's test vector in tests/test_game.c), keyed by the seed. Each use
+// gets its own keystream, named by a (purpose, deal number, sub-index) nonce,
+// and nothing is carried from one to the next: the only state is the seed and
+// the count of deals. Recovering the unseen cards now means searching the
+// seed space, which at 64 bits is out of reach for a card game.
+//
+// Integer-only and libc-only like the rest of the engine. The repo vendors
+// nothing, so this is the block function written out; it is used as a
+// keystream generator and for nothing else.
+static uint32_t rotl32(uint32_t v, int n) { return (v << n) | (v >> (32 - n)); }
+
+#define CHACHA_QR(a, b, c, d)                    \
+    do {                                         \
+        a += b; d ^= a; d = rotl32(d, 16);       \
+        c += d; b ^= c; b = rotl32(b, 12);       \
+        a += b; d ^= a; d = rotl32(d, 8);        \
+        c += d; b ^= c; b = rotl32(b, 7);        \
+    } while (0)
+
+static void chacha20_block(const uint32_t key[8], uint32_t counter,
+                           const uint32_t nonce[3], uint32_t out[16]) {
+    uint32_t in[16] = {
+        0x61707865u, 0x3320646eu, 0x79622d32u, 0x6b206574u,   // "expand 32-byte k"
+        key[0], key[1], key[2], key[3], key[4], key[5], key[6], key[7],
+        counter, nonce[0], nonce[1], nonce[2],
+    };
+    uint32_t x[16];
+    for (int i = 0; i < 16; i++) x[i] = in[i];
+    for (int round = 0; round < 10; round++) {   // 20 rounds, as column + diagonal pairs
+        CHACHA_QR(x[0], x[4], x[8],  x[12]);
+        CHACHA_QR(x[1], x[5], x[9],  x[13]);
+        CHACHA_QR(x[2], x[6], x[10], x[14]);
+        CHACHA_QR(x[3], x[7], x[11], x[15]);
+        CHACHA_QR(x[0], x[5], x[10], x[15]);
+        CHACHA_QR(x[1], x[6], x[11], x[12]);
+        CHACHA_QR(x[2], x[7], x[8],  x[13]);
+        CHACHA_QR(x[3], x[4], x[9],  x[14]);
+    }
+    for (int i = 0; i < 16; i++) out[i] = x[i] + in[i];
 }
 
-// Uniform-ish value in [0, n). The modulo bias over 2^64 is immeasurable for
-// n <= 60.
-static uint32_t rng_below(uint64_t* s, uint32_t n) {
-    return (uint32_t)(rng_next(s) % n);
+// What a keystream is for. Part of the nonce, so no two uses share one.
+enum {
+    DEAL_DEALER    = 1,   // who deals the first round
+    DEAL_SHUFFLE   = 2,   // a round's deck
+    DEAL_RESHUFFLE = 3,   // a turned-over stockpile (reshuffle_on_recycle)
+    DEAL_AI        = 4,   // the starting state of the AI's own dice (Game.rng)
+};
+
+typedef struct {
+    uint32_t key[8];
+    uint32_t nonce[3];
+    uint32_t counter;     // next block
+    uint32_t block[16];
+    int      used;        // words of `block` consumed (16 = none left)
+} DealStream;
+
+// The seed a match actually runs on: 0 means "unseeded" to the callers, and
+// stands for one fixed value here so such a game is still reproducible.
+static uint64_t match_seed(const Game* g) {
+    return g->rules.seed ? g->rules.seed : 0x9E3779B97F4A7C15ULL;
+}
+
+static void deal_stream(DealStream* ds, uint64_t seed, uint32_t purpose,
+                        uint32_t deal_no, uint32_t sub) {
+    ds->key[0] = (uint32_t)seed;
+    ds->key[1] = (uint32_t)(seed >> 32);
+    ds->key[2] = 0x6e65706fu;   // "openrackem deal stream 1" fills the rest of
+    ds->key[3] = 0x6b636172u;   // the key: a fixed label, so this keystream is
+    ds->key[4] = 0x64206d65u;   // this engine's and no other use of the cipher
+    ds->key[5] = 0x206c6165u;   // with the same 64 bits could collide with it
+    ds->key[6] = 0x65727473u;
+    ds->key[7] = 0x31206d61u;
+    ds->nonce[0] = purpose;
+    ds->nonce[1] = deal_no;
+    ds->nonce[2] = sub;
+    ds->counter = 0;
+    ds->used = 16;
+}
+
+static uint64_t deal_next(DealStream* ds) {
+    if (ds->used > 14) {
+        chacha20_block(ds->key, ds->counter++, ds->nonce, ds->block);
+        ds->used = 0;
+    }
+    uint64_t v = (uint64_t)ds->block[ds->used] | ((uint64_t)ds->block[ds->used + 1] << 32);
+    ds->used += 2;
+    return v;
+}
+
+// A uniform value in [0, n): draws above the largest multiple of n are thrown
+// away rather than folded in, so no card position is favored even slightly.
+// (The loop all but never repeats, and is deterministic when it does.)
+static uint32_t deal_below(DealStream* ds, uint32_t n) {
+    uint64_t limit = UINT64_MAX - (UINT64_MAX % n);
+    uint64_t v;
+    do { v = deal_next(ds); } while (v >= limit);
+    return (uint32_t)(v % n);
 }
 
 // --- Scoring (pure) --------------------------------------------------------
@@ -100,9 +194,9 @@ static void push_discard(Game* g, uint8_t card) {
     g->discard[g->discard_count++] = card;
 }
 
-static void shuffle(Game* g, uint8_t* cards, int count) {
+static void shuffle(DealStream* ds, uint8_t* cards, int count) {
     for (int i = count - 1; i > 0; i--) {
-        uint32_t j = rng_below(&g->rng, (uint32_t)(i + 1));
+        uint32_t j = deal_below(ds, (uint32_t)(i + 1));
         uint8_t t = cards[i];
         cards[i] = cards[j];
         cards[j] = t;
@@ -122,7 +216,11 @@ static void recycle_stock(Game* g) {
     g->discard_count = 1;
     g->recycles++;
     if (g->rules.reshuffle_on_recycle) {
-        shuffle(g, g->stock, g->stock_count);
+        // This round's deal number (deal_round has already counted it) and
+        // which turn-over this is: a keystream of its own every time.
+        DealStream ds;
+        deal_stream(&ds, match_seed(g), DEAL_RESHUFFLE, g->deals, g->recycles);
+        shuffle(&ds, g->stock, g->stock_count);
     }
     g->events |= EV_RECYCLE;
 }
@@ -138,7 +236,10 @@ static void deal_round(Game* g) {
 
     for (int i = 0; i < deck; i++) g->stock[i] = (uint8_t)(i + 1);
     g->stock_count = (uint8_t)deck;
-    shuffle(g, g->stock, deck);
+    DealStream ds;
+    deal_stream(&ds, match_seed(g), DEAL_SHUFFLE, g->deals, 0);
+    g->deals++;
+    shuffle(&ds, g->stock, deck);
 
     for (int slot = RACK_SLOTS - 1; slot >= 0; slot--) {
         for (int k = 0; k < n; k++) {
@@ -271,9 +372,14 @@ void game_init(Game* out, const Rules* rules) {
     g->rules.ai_difficulty        = rules->ai_difficulty;
     g->rules.seed                 = rules->seed;
     rules_normalize(&g->rules);
-    // The caller seeds from the clock when it wants variety; the engine only
-    // guards the one value xorshift can't take.
-    g->rng = g->rules.seed ? g->rules.seed : 0x9E3779B97F4A7C15ULL;
+    // The caller seeds from the clock (or, in the daemon, the system's random
+    // source) when it wants variety. The AI's dice start from the deal stream
+    // rather than from the seed itself, so nothing the AI is seen to do is a
+    // direct function of the seed; 0 is the one state xorshift can't hold.
+    DealStream ds;
+    deal_stream(&ds, match_seed(g), DEAL_AI, 0, 0);
+    g->rng = deal_next(&ds);
+    if (g->rng == 0) g->rng = 0x9E3779B97F4A7C15ULL;
 
     for (int i = 0; i < g->rules.player_count; i++) {
         g->players[i].is_ai = (i != g->rules.human_seat);
@@ -281,9 +387,10 @@ void game_init(Game* out, const Rules* rules) {
     g->match_winner = NO_WINNER;
     g->round_no = 1;
 
-    // First dealer: drawn from the seeded RNG (the digital stand-in for
-    // cutting low card); the deal rotates left each round.
-    g->dealer = (uint8_t)rng_below(&g->rng, (uint32_t)g->rules.player_count);
+    // First dealer: drawn from the seed (the digital stand-in for cutting low
+    // card); the deal rotates left each round.
+    deal_stream(&ds, match_seed(g), DEAL_DEALER, 0, 0);
+    g->dealer = (uint8_t)deal_below(&ds, (uint32_t)g->rules.player_count);
     deal_round(g);
 }
 
@@ -294,8 +401,9 @@ void game_destroy(Game* game) {
 void game_redact_for(Game* out, const Game* g, int seat) {
     memcpy(out, g, sizeof *out);
 
-    // The RNG state and the seed each reconstruct every hidden card (the
-    // GameView seed-leak lesson): neither may reach a client in any form.
+    // The seed reconstructs every hidden card (the GameView seed-leak
+    // lesson), and the AI's dice are derived from it: neither may reach a
+    // client in any form. (`deals` stays: it is the round count.)
     out->rng = 0;
     out->rules.seed = 0;
 
@@ -446,8 +554,8 @@ void game_next_round(Game* g) {
         return;
     }
     g->dealer = (uint8_t)((g->dealer + 1) % g->rules.player_count);
-    if (g->round_no < 255) g->round_no++;   // saturate: a 10000-point match can
-    deal_round(g);                          // legitimately pass 255 rounds
+    if (g->round_no < 255) g->round_no++;   // saturate: a long run of stalemates
+    deal_round(g);                          // and ties can pass 255 rounds
 }
 
 // --- Per-step presentation + AI pacing -------------------------------------

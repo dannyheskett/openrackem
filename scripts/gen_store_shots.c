@@ -54,7 +54,9 @@ int main(int argc, char** argv){
     snap("02-table", g, &ui);
 
     // 03: holding a card, choosing a slot.
-    g->turn = 0; g->phase = PHASE_PLACE; g->held_card = 33; g->held_from_discard = false;
+    // The held card is the stock's top one, so it is never a card already on
+    // show (a fixed value could be one the deal put in a rack).
+    g->turn = 0; g->phase = PHASE_PLACE; g->held_card = g->stock[0]; g->held_from_discard = false;
     snap("03-place", g, &ui);
 
     // 04: the round-scoring reveal.

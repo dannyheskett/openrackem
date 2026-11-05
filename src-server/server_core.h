@@ -54,16 +54,31 @@
 #ifndef SRV_LIST_PUSH_MS
 #define SRV_LIST_PUSH_MS  2000    // room-list update spacing per viewer
 #endif
+#ifndef SRV_LOBBY_UNREADY_MS
+#define SRV_LOBBY_UNREADY_MS 600000 // waiting room: not ready this long, moved out
+#endif
+
+// Connections one address may hold at once (a household or a classroom fits;
+// one machine can no longer take every slot).
+#ifndef SRV_IP_MAX_CONNS
+#define SRV_IP_MAX_CONNS  32
+#endif
 
 // Transport interface. `send` delivers one text message to a live client;
 // `kick` asks the transport to close a client (the transport then reports it
 // back through srv_client_gone); `log` emits one ops/audit line (on fly.io
-// that is stdout).
+// that is stdout). `entropy` fills a buffer from the operating system's random
+// source: member keys and match seeds are drawn from it, because either one
+// reconstructs hidden state (a key is a seat; a seed is every card) and so
+// must not be derivable from anything a client is ever sent. The daemon always
+// provides it. Left NULL, the core falls back to its seeded generator, which
+// is predictable and exists only so the unit tests are deterministic.
 typedef struct {
     void (*send)(void* ud, int client, const char* text, size_t len);
     void (*kick)(void* ud, int client);
     void (*log)(void* ud, const char* line);
     void* ud;
+    void (*entropy)(void* ud, uint8_t* out, size_t n);
 } SrvIo;
 
 typedef struct Srv Srv;
