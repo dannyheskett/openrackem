@@ -132,8 +132,14 @@ jobs:
   build-mac:
     name: macOS universal build
     needs: prepare
-    runs-on: macos-14
+    # macos-14 was retired by GitHub on 2026-11-02 (a job asking for it is
+    # refused outright). The deployment target is pinned so the move to a newer
+    # image does not move the oldest macOS the build runs on: without it clang
+    # targets the image's own macOS, which had been 14.
+    runs-on: macos-15
     timeout-minutes: 10
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '14.0'
     steps:
       - uses: actions/checkout@v7
       - name: Build raylib (universal arm64 + x86_64)
